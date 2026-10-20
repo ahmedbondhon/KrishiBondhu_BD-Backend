@@ -1,0 +1,36 @@
+# ============================================================================
+# KrishiBondhu Bangladesh — Backend Dependencies
+# ============================================================================
+
+# --- Web Framework ---
+fastapi[standard]==0.115.6
+uvicorn[standard]==0.34.0
+
+# --- Database ---
+sqlalchemy[asyncio]==2.0.36
+asyncpg==0.30.0
+alembic==1.14.1
+greenlet==3.1.1
+
+# --- Validation & Settings ---
+pydantic==2.10.4
+pydantic-settings==2.7.1
+email-validator==2.2.0
+
+# --- Authentication ---
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.2.1
+python-multipart==0.0.20
+
+# --- Rate Limiting ---
+slowapi==0.1.10
+
+# --- Testing ---
+httpx>=0.28.0
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+
+# --- Utilities ---
+python-dotenv==1.0.1
+pytz==2024.2

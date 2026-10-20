@@ -20,3 +20,7 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+
+docs
+supabase_geo_and_fk_fix.sql
