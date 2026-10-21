@@ -1,0 +1,27 @@
+# ============================================================
+# KrishiBondhu Bangladesh - AI Service Dependencies
+# ============================================================
+
+# --- Core Framework ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# --- Validation ---
+pydantic==2.9.2
+
+# --- Computer Vision (for production model inference) ---
+# Uncomment when integrating real model:
+# tensorflow==2.17.0        # or torch==2.4.1 + torchvision
+# onnxruntime==1.19.2       # lightweight ONNX inference runtime
+# opencv-python==4.10.0.84  # image preprocessing
+# Pillow==10.4.0            # image loading
+
+# --- Google Gemini Vision API ---
+google-genai>=0.8.0                  # New Gemini SDK (replaces google-generativeai)
+
+# --- HTTP Client (for health checks + image fetching) ---
+httpx==0.27.2
+
+# --- Utilities ---
+python-dotenv==1.0.1
+numpy==2.1.1                # Required by CV/ML libraries

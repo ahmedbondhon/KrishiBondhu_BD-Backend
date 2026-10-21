@@ -1,0 +1,42 @@
+name: KrishiBondhu Backend CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'backend/**'
+      - 'ai-service/**'
+      - 'database/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'backend/**'
+      - 'ai-service/**'
+
+jobs:
+  # ─── Code Quality ─────────────────────────────────────────
+  lint:
+    name: Code Quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install linting tools
+        run: pip install ruff
+
+      - name: Run Ruff linter
+        run: |
+          ruff check backend/app --select E,W,F --ignore E501
+          ruff check ai-service/app --select E,W,F --ignore E501
+
+      - name: Check formatting
+        run: ruff format --check backend/app ai-service/app
