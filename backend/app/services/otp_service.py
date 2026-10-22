@@ -110,11 +110,12 @@ class OtpService:
         phone = normalize_bd_phone(phone_number)
         win = settings.otp_rate_limit_window_minutes
 
-        if await self.repo.count_recent_otps_for_phone(phone, window_minutes=win) >= settings.otp_rate_limit_per_phone:
-            self._raise_rate_limit("phone")
+        if not settings.otp_demo_mode:
+            if await self.repo.count_recent_otps_for_phone(phone, window_minutes=win) >= settings.otp_rate_limit_per_phone:
+                self._raise_rate_limit("phone")
 
-        if ip_address and not ip_rate_limiter.check_and_record(ip_address, settings.otp_rate_limit_per_ip, win):
-            self._raise_rate_limit("IP")
+            if ip_address and not ip_rate_limiter.check_and_record(ip_address, settings.otp_rate_limit_per_ip, win):
+                self._raise_rate_limit("IP")
 
         otp_code = settings.otp_demo_code if settings.otp_demo_mode else generate_numeric_otp(settings.otp_length)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.otp_expire_minutes)
@@ -137,11 +138,10 @@ class OtpService:
 
     def _dispatch_sms(self, phone: str, otp_code: str, purpose: str) -> None:
         msg = f"[কৃষিবন্ধু] আপনার ওটিপি কোড হলো: {otp_code}। মেয়াদ {settings.otp_expire_minutes} মিনিট।"
+        # Always log OTP in console for easy development/testing without any external demo endpoints
+        logger.info(f"\n======================================================\n[KRISHIBONDHU OTP] Phone: {phone} | Purpose: {purpose}\n==> YOUR OTP CODE IS: {otp_code}\n======================================================\n")
         if settings.sms_mode == "simulator":
             sms_inbox.put(phone, msg, otp_code=otp_code)
-            logger.info(f"==> SMS SIMULATOR: Stored OTP for {phone} [{purpose}]")
-        else:
-            logger.info(f"==> SMS DISABLED: OTP for {phone} [{purpose}] | Code: {otp_code}")
 
     async def verify_otp(self, phone_number: str, otp_code: str, purpose: str = "registration") -> dict:
         phone = normalize_bd_phone(phone_number)
@@ -153,7 +153,8 @@ class OtpService:
         if record.is_used:
             raise InvalidOtpError("This OTP has already been used. Please request a new one.")
 
-        if not hmac_verify_otp(otp_code.strip(), record.otp_hash, settings.otp_hmac_secret):
+        is_demo_match = settings.otp_demo_mode and (otp_code.strip() == settings.otp_demo_code)
+        if not is_demo_match and not hmac_verify_otp(otp_code.strip(), record.otp_hash, settings.otp_hmac_secret):
             await self.repo.increment_otp_attempts(record.id)
             rem = settings.otp_max_verify_attempts - (record.verify_attempts + 1)
             if rem <= 0:

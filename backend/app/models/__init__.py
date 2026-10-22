@@ -9,6 +9,7 @@ from app.models.auth import (
     UserConsent,
 )
 from app.models.geo import District, Division, Union, Upazila
+from app.models.system import File
 
 __all__ = [
     "Role",
@@ -23,4 +24,5 @@ __all__ = [
     "District",
     "Upazila",
     "Union",
+    "File",
 ]

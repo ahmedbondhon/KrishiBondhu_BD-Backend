@@ -63,6 +63,13 @@ class UserNotFoundError(HTTPException):
         )
 
 
+class InvalidProfileDataError(HTTPException):
+    """Raised when profile fields or geographic relationships are invalid."""
+
+    def __init__(self, detail: str):
+        super().__init__(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+
 class RoleNotFoundError(HTTPException):
     """Raised when the requested role code doesn't exist."""
 
@@ -130,4 +137,34 @@ class ConsentRequiredError(HTTPException):
         super().__init__(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=detail,
+        )
+
+
+def register_exception_handlers(app):
+    """Register standard validation and HTTP exception handlers."""
+    from fastapi.exceptions import RequestValidationError
+    from fastapi.responses import JSONResponse
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error_handler(_, exc: RequestValidationError):
+        errors = [
+            {"field": ".".join(str(part) for part in error["loc"]), "message": error["msg"]}
+            for error in exc.errors()
+        ]
+        detail = "; ".join(f"{e['field']}: {e['message']}" for e in errors)
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": detail,
+                "message": "ইনপুট তথ্য সঠিক নয় / Invalid input.",
+                "errors": errors,
+            },
+        )
+
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(_, exc: HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail, "message": exc.detail},
+            headers=exc.headers,
         )

@@ -1,18 +1,19 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from slowapi.errors import RateLimitExceeded
 
 from app.api.v1 import api_v1_router
 from app.core.config import get_settings
+from app.core.exceptions import register_exception_handlers
 from app.core.security import limiter, rate_limit_exceeded_handler
 
 settings = get_settings()
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Prevent demo/simulator modes in production
     if settings.app_env.lower() == "production" and settings.otp_demo_mode:
         raise RuntimeError("OTP_DEMO_MODE cannot be enabled in production!")
     if not settings.debug and settings.sms_mode == "simulator":
@@ -21,54 +22,41 @@ async def lifespan(app: FastAPI):
     from app.db.session import engine
     await engine.dispose()
 
-
 app = FastAPI(
     title=settings.app_name,
-    description="কৃষিবন্ধু বাংলাদেশ — Crop diagnosis and advisory platform for smallholder farmers.",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
 )
 
+# Exception handlers & Rate Limiter
+register_exception_handlers(app)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
-_origins = [o.strip() for o in settings.cors_allowed_origins.split(",") if o.strip()]
+# Static & Uploads Mount
+Path(settings.upload_dir, "avatars").mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=settings.upload_dir), name="static")
+app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
+
+# CORS Middleware
+origins = [o.strip() for o in settings.cors_allowed_origins.split(",") if o.strip()]
+allow_all = "*" in origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_origins if _origins else ["*"],
-    allow_credentials=True,
+    allow_origins=["*"] if allow_all else origins,
+    allow_credentials=not allow_all,
     allow_methods=["*"],
-    allow_headers=["Authorization", "Content-Type", "Accept", "Origin", "User-Agent", "*"],
+    allow_headers=["*"],
 )
 
+# Routers
 app.include_router(api_v1_router, prefix=settings.api_v1_prefix)
-
-# Demo UI routes — only in DEBUG mode
 if settings.debug:
-    from demo.demo import demo_router
+    from app.api.demo import demo_router
     app.include_router(demo_router)
-
-
-@app.get("/", include_in_schema=False)
-async def root():
-    from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/demo" if settings.debug else "/docs")
-
-
-@app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
-    from fastapi.responses import Response
-    return Response(content=b"", media_type="image/x-icon")
-
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    return {
-        "status": "healthy",
-        "service": settings.app_name,
-        "version": "1.0.0",
-        "debug": settings.debug,
-        "sms_mode": settings.sms_mode,
-    }
+    return {"status": "healthy", "service": settings.app_name, "version": "1.0.0"}

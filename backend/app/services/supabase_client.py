@@ -79,6 +79,18 @@ class SupabaseClient:
             "user_id": user_id, "ip_address": ip, "user_agent": user_agent, "success": success
         })
 
+    async def update_user_profile(self, user_id: str, payload: dict[str, Any]) -> bool:
+        """Update farmer profile details in Supabase auth.users table."""
+        # Convert any UUID objects to strings
+        cleaned = {}
+        for k, v in payload.items():
+            if v is not None:
+                cleaned[k] = str(v)
+            else:
+                cleaned[k] = None
+        cleaned["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return bool(await self._request("PATCH", f"users?id=eq.{user_id}", json=cleaned))
+
     async def update_user_password(self, phone: str, password_hash: str) -> bool:
         phone = normalize_bd_phone(phone)
         return bool(await self._request("PATCH", f"users?phone_number=eq.{phone}", json={"password_hash": password_hash}))
@@ -108,6 +120,43 @@ class SupabaseClient:
                 "user_id": user_id, "consent_type_id": ct[0]["id"],
                 "is_granted": is_granted, "ip_address": ip, "user_agent": ua,
             })
+
+    async def upload_storage_file(self, bucket: str, path: str, content: bytes, mime_type: str) -> str | None:
+        """Upload a file to Supabase Storage bucket and return its public URL."""
+        settings = get_settings()
+        url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/{bucket}/{path.lstrip('/')}"
+        headers = {
+            "apikey": settings.supabase_service_role_key,
+            "Authorization": f"Bearer {settings.supabase_service_role_key}",
+            "Content-Type": mime_type,
+            "x-upsert": "true",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(url, headers=headers, content=content)
+                if resp.status_code in (200, 201):
+                    return f"{settings.supabase_url.rstrip('/')}/storage/v1/object/public/{bucket}/{path.lstrip('/')}"
+                logger.error(f"Supabase storage upload failed: {resp.status_code} - {resp.text}")
+        except Exception as e:
+            logger.error(f"Supabase storage upload error: {e}")
+        return None
+
+    async def delete_storage_file(self, bucket: str, path: str) -> bool:
+        """Delete a file from Supabase Storage bucket."""
+        settings = get_settings()
+        url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/{bucket}"
+        headers = {
+            "apikey": settings.supabase_service_role_key,
+            "Authorization": f"Bearer {settings.supabase_service_role_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.request("DELETE", url, headers=headers, json={"prefixes": [path.lstrip("/")]})
+                return resp.status_code in (200, 204)
+        except Exception as e:
+            logger.error(f"Supabase storage delete error: {e}")
+        return False
 
     async def get_inspector_data(self) -> dict[str, list]:
         users_raw = await self._request("GET", "users?select=*,roles(name,code)&order=created_at.desc&limit=15") or []

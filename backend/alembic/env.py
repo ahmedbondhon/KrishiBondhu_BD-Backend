@@ -25,6 +25,7 @@ from app.models.auth import (  # noqa: F401
     UserConsent,
 )
 from app.models.geo import District, Division, Union, Upazila  # noqa: F401
+from app.models.system import File  # noqa: F401
 
 # Alembic Config object
 config = context.config

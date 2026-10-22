@@ -22,12 +22,16 @@ class Settings(BaseSettings):
     app_env: str = "development"
     debug: bool = True
     api_v1_prefix: str = "/api/v1"
-    cors_allowed_origins: str = "*"  # Comma-separated or "*"
+    cors_allowed_origins: str = "http://localhost:3000,http://localhost:5173"
 
     # --- Supabase & Storage (load from .env, never hardcode secrets) ---
+    storage_provider: str = "supabase"
+    storage_bucket_name: str = "krishibondhu-uploads"
     supabase_url: str = ""
     supabase_service_role_key: str = ""
-    storage_bucket_name: str = "krishibondhu-uploads"
+    max_file_size_bytes: int = 2 * 1024 * 1024
+    upload_dir: str = "uploads"
+    public_base_url: str = "http://localhost:8000"
     enable_supabase_auth_fallback: bool = True  # Can be disabled in production via env
 
     # --- Database ---
@@ -59,7 +63,7 @@ class Settings(BaseSettings):
     # --- OTP Security & Demo Mode ---
     otp_hmac_secret: str = "change-me-otp-hmac-secret"  # HMAC key for hashing OTPs
     otp_max_verify_attempts: int = 5  # Max wrong attempts before OTP invalidated
-    otp_demo_mode: bool = False  # If True, generates fixed demo OTP (never enable in production)
+    otp_demo_mode: bool = True  # If True, generates fixed demo OTP (never enable in production)
     otp_demo_code: str = "123456"  # Fixed code used when otp_demo_mode is True
 
     # --- SMS Simulator ---
