@@ -1,0 +1,92 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 140 25% 98%;
+    --foreground: 160 30% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 160 30% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 160 30% 12%;
+
+    --primary: 142 71% 35%;
+    --primary-foreground: 140 30% 98%;
+
+    --secondary: 140 30% 94%;
+    --secondary-foreground: 142 71% 25%;
+
+    --muted: 140 20% 93%;
+    --muted-foreground: 160 10% 45%;
+
+    --accent: 140 35% 90%;
+    --accent-foreground: 142 71% 25%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 140 20% 88%;
+    --input: 140 20% 88%;
+    --ring: 142 71% 35%;
+
+    --radius: 0.75rem;
+  }
+
+  .dark {
+    --background: 160 30% 6%;
+    --foreground: 140 20% 96%;
+
+    --card: 160 28% 9%;
+    --card-foreground: 140 20% 96%;
+
+    --popover: 160 28% 9%;
+    --popover-foreground: 140 20% 96%;
+
+    --primary: 142 70% 45%;
+    --primary-foreground: 160 30% 6%;
+
+    --secondary: 160 25% 15%;
+    --secondary-foreground: 140 20% 96%;
+
+    --muted: 160 25% 16%;
+    --muted-foreground: 140 15% 65%;
+
+    --accent: 160 25% 18%;
+    --accent-foreground: 140 20% 96%;
+
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 160 25% 18%;
+    --input: 160 25% 18%;
+    --ring: 142 70% 45%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground antialiased selection:bg-emerald-500 selection:text-white;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* Glassmorphism and Custom Utilities */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(220, 240, 225, 0.6);
+}
+
+.dark .glass-panel {
+  background: rgba(15, 28, 22, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(34, 197, 94, 0.15);
+}

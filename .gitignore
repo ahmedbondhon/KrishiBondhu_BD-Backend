@@ -21,7 +21,11 @@ __pycache__/
 # macOS
 .DS_Store
 
-# Demo folder (local testing only, not for git push)
+# Demo frontend build & dependencies
+demo/node_modules/
+demo/.next/
+demo/.env*.local
+demo/*.tsbuildinfo
 
 uploads/
 
