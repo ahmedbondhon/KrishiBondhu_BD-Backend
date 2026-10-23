@@ -87,6 +87,7 @@ class CaseImage(Base, UUIDPrimaryKeyMixin):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     case: Mapped["DiagnosisCase"] = relationship("DiagnosisCase", back_populates="images")
+    file: Mapped["SystemFile"] = relationship("SystemFile", foreign_keys=[file_id])
 
 
 class CaseStatusHistory(Base, UUIDPrimaryKeyMixin):
@@ -171,3 +172,4 @@ class CaseAssignment(Base, UUIDPrimaryKeyMixin):
 # Import here to avoid circular imports with advisory.py
 from app.models.ai import AIPrediction  # noqa: E402
 from app.models.advisory import Advisory  # noqa: E402
+from app.models.system import SystemFile  # noqa: E402

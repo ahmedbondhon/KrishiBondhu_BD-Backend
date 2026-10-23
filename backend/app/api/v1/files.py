@@ -195,8 +195,10 @@ async def get_view_url(
     if not file:
         return error_response("File not found", "FILE_NOT_FOUND", 404)
 
-    # Access control: only uploader or admin/tech_admin
-    if file.uploaded_by != current_user.id and current_user.role_code not in ("admin", "administrator", "tech_admin", "technical_admin"):
+    # Access control: only uploader or admin/tech_admin/expert/agent
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    allowed_roles = ("admin", "administrator", "tech_admin", "technical_admin", "expert", "agent")
+    if file.uploaded_by != current_user.id and user_role not in allowed_roles:
         return error_response("Access denied", "FORBIDDEN", 403)
 
     view_url = storage_service.generate_view_url(file.storage_path)

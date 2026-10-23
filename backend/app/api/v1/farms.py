@@ -15,7 +15,7 @@ Only the plot owner can access their own plots (enforced in service layer).
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,6 +99,8 @@ async def create_farm(
 
 @router.get("", summary="List all farm plots for the current farmer")
 async def list_farms(
+    limit: int = Query(50, ge=1, le=200, description="Max plots to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -108,6 +110,8 @@ async def list_farms(
             Plot.user_id == current_user.id,
             Plot.is_deleted == False,
         ).order_by(Plot.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
     plots = result.scalars().all()
 
@@ -218,7 +222,8 @@ async def list_crop_cycles(
             detail={"code": "PLOT_NOT_FOUND", "message_bn": "জমিটি পাওয়া যায়নি।"},
         )
 
-    if current_user.role_code not in ("admin", "administrator", "tech_admin", "technical_admin") and plot.user_id != current_user.id:
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    if user_role not in ("admin", "administrator", "tech_admin", "technical_admin", "agent") and plot.user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "FORBIDDEN", "message_bn": "আপনার এই জমির তথ্য দেখার অনুমতি নেই।"},

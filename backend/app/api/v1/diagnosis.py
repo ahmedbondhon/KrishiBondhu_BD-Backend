@@ -20,7 +20,7 @@ Routes (Expert-facing):
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -30,6 +30,7 @@ from app.core.responses import success_response
 from app.models.advisory import Advisory
 from app.models.ai import AIPrediction
 from app.models.auth import User
+from app.models.catalog import Issue
 from app.models.diagnosis import CaseAssignment, DiagnosisCase
 from app.schemas.diagnosis import (
     AttachCaseImageRequest,
@@ -38,7 +39,7 @@ from app.schemas.diagnosis import (
     SubmitExpertReviewRequest,
     SubmitFeedbackRequest,
 )
-from app.services.diagnosis_service import DiagnosisService, diagnosis_service
+from app.services.diagnosis_service import DiagnosisService, _confidence_label, diagnosis_service
 
 router = APIRouter(tags=["Crop Diagnosis (ChashiGuard)"])
 expert_router = APIRouter(prefix="/expert", tags=["Expert Review Workflow"])
@@ -89,7 +90,8 @@ async def attach_image(
     Attach a file (already uploaded via /files flow) to a diagnosis case.
     The `is_primary=True` image will be used for AI analysis.
     """
-    image = await diagnosis_service.attach_image(db, case_id, current_user.id, payload)
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    image = await diagnosis_service.attach_image(db, case_id, current_user.id, payload, user_role=user_role)
     return success_response(
         data={"case_image_id": str(image.id), "case_id": str(image.case_id)},
         message="ছবি সংযুক্ত করা হয়েছে।",
@@ -117,7 +119,8 @@ async def analyze_case(
     Safety Rule: If requires_expert_review=True, no unverified chemical
     dosages or treatment instructions are shown in the advisory.
     """
-    result = await diagnosis_service.analyze_case(db, case_id, current_user.id)
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    result = await diagnosis_service.analyze_case(db, case_id, current_user.id, user_role=user_role)
     return success_response(
         data=result.model_dump(),
         message="বিশ্লেষণ সম্পন্ন হয়েছে।",
@@ -137,9 +140,10 @@ async def get_case(
     result = await db.execute(
         select(DiagnosisCase)
         .options(
-            selectinload(DiagnosisCase.predictions),
+            selectinload(DiagnosisCase.predictions).selectinload(AIPrediction.details),
             selectinload(DiagnosisCase.advisory),
             selectinload(DiagnosisCase.expert_reviews),
+            selectinload(DiagnosisCase.images),
         )
         .where(DiagnosisCase.id == case_id, DiagnosisCase.is_deleted == False)
     )
@@ -150,8 +154,10 @@ async def get_case(
             detail={"code": "CASE_NOT_FOUND", "message_bn": "কেসটি পাওয়া যায়নি।"},
         )
 
-    # Ownership check: Farmers and agents may only access their own cases
-    if current_user.role.code in ("farmer", "agent") and case.farmer_id != current_user.id:
+    # Ownership check: Farmers may only access their own cases; agents/admins/experts can access any
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    allowed_roles = ("admin", "administrator", "tech_admin", "technical_admin", "agent", "expert")
+    if user_role not in allowed_roles and case.farmer_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "FORBIDDEN", "message_bn": "আপনার এই কেসের তথ্য দেখার অনুমতি নেই।"},
@@ -171,6 +177,46 @@ async def get_case(
         }
 
     latest_prediction = max(case.predictions, key=lambda p: p.created_at) if case.predictions else None
+    latest_review = max(case.expert_reviews, key=lambda r: r.reviewed_at) if case.expert_reviews else None
+
+    target_issue_id = None
+    if latest_review and latest_review.verified_issue_id:
+        target_issue_id = latest_review.verified_issue_id
+    elif latest_prediction and latest_prediction.primary_issue_id:
+        target_issue_id = latest_prediction.primary_issue_id
+
+    issue_name_bn = None
+    issue_name_en = None
+    if target_issue_id:
+        issue_res = await db.execute(select(Issue).where(Issue.id == target_issue_id))
+        issue = issue_res.scalar_one_or_none()
+        if issue:
+            issue_name_bn = issue.name_bn
+            issue_name_en = issue.name_en
+
+    confidence_score = float(latest_prediction.confidence_score) if latest_prediction else None
+    confidence_level = _confidence_label(confidence_score) if confidence_score is not None else None
+
+    top_predictions = [
+        {
+            "rank": d.rank_order,
+            "class_label": d.class_label,
+            "confidence_score": float(d.confidence_score),
+            "issue_id": str(d.issue_id) if d.issue_id else None,
+        }
+        for d in sorted(latest_prediction.details, key=lambda x: x.rank_order)
+    ] if latest_prediction and latest_prediction.details else []
+
+    images_data = [
+        {
+            "id": str(img.id),
+            "file_id": str(img.file_id),
+            "image_type": img.image_type,
+            "is_primary": img.is_primary,
+            "created_at": img.created_at.isoformat() if img.created_at else None,
+        }
+        for img in sorted(case.images, key=lambda x: (not x.is_primary, x.created_at))
+    ]
 
     expert_reviews_data = [
         {
@@ -190,10 +236,19 @@ async def get_case(
             "case_id": str(case.id),
             "case_number": case.case_number,
             "case_status": case.status,
+            "status": case.status,
             "urgency_level": case.urgency_level,
+            "crop_id": str(case.crop_id) if case.crop_id else None,
+            "plot_id": str(case.plot_id) if case.plot_id else None,
             "farmer_notes": case.farmer_notes,
+            "issue_id": str(target_issue_id) if target_issue_id else None,
+            "issue_name_bn": issue_name_bn,
+            "issue_name_en": issue_name_en,
+            "confidence_score": confidence_score,
+            "confidence_level": confidence_level,
             "requires_expert_review": case.status == "escalated" or (latest_prediction is not None and not latest_prediction.is_confident),
-            "confidence_score": float(latest_prediction.confidence_score) if latest_prediction else None,
+            "top_predictions": top_predictions,
+            "images": images_data,
             "advisory": advisory_data,
             "expert_reviews": expert_reviews_data,
             "expert_reviews_count": len(case.expert_reviews),
@@ -205,6 +260,8 @@ async def get_case(
 
 @router.get("/diagnosis-cases", summary="List all diagnosis cases for the current farmer")
 async def list_cases(
+    limit: int = Query(50, ge=1, le=200, description="Max cases to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -216,6 +273,8 @@ async def list_cases(
             DiagnosisCase.is_deleted == False,
         )
         .order_by(DiagnosisCase.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
     cases = result.scalars().all()
 
@@ -248,7 +307,8 @@ async def request_expert_review(
     Farmer explicitly requests expert review (e.g., wants a second opinion).
     A CaseAssignment record is created, status history logged, and the case is escalated.
     """
-    case = await diagnosis_service.request_expert_review(db, case_id, current_user.id)
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    case = await diagnosis_service.request_expert_review(db, case_id, current_user.id, user_role=user_role)
 
     return success_response(
         data={"case_id": str(case.id), "status": case.status},
@@ -271,7 +331,8 @@ async def submit_feedback(
     Record the farmer's outcome after applying the advisory.
     Ratings (1-5 stars) and outcome status help improve advisory quality.
     """
-    feedback = await diagnosis_service.submit_feedback(db, case_id, current_user.id, payload)
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    feedback = await diagnosis_service.submit_feedback(db, case_id, current_user.id, payload, user_role=user_role)
     return success_response(
         data={"feedback_id": str(feedback.id)},
         message="আপনার মতামত জমা হয়েছে। ধন্যবাদ।",
@@ -285,6 +346,8 @@ async def submit_feedback(
 
 @expert_router.get("/cases", summary="Get the pending cases queue for agricultural experts")
 async def get_expert_cases(
+    limit: int = Query(50, ge=1, le=200, description="Max cases to return"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
     current_user: User = Depends(require_roles("expert", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -296,7 +359,8 @@ async def get_expert_cases(
         DiagnosisCase.status == "escalated",
         DiagnosisCase.is_deleted == False,
     )
-    if current_user.role_code == "expert":
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    if user_role == "expert":
         query = query.where(
             or_(
                 DiagnosisCase.assigned_expert_id == current_user.id,
@@ -306,7 +370,7 @@ async def get_expert_cases(
     query = query.order_by(
         DiagnosisCase.urgency_level.desc(),
         DiagnosisCase.created_at.asc(),
-    )
+    ).limit(limit).offset(offset)
     result = await db.execute(query)
     cases = result.scalars().all()
 

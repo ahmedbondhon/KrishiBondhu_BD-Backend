@@ -182,12 +182,13 @@ class DiagnosisService:
         case_id: uuid.UUID,
         farmer_id: uuid.UUID,
         payload: AttachCaseImageRequest,
+        user_role: str = "farmer",
     ) -> CaseImage:
         """Attach a confirmed uploaded file to a diagnosis case."""
-        # Verify case belongs to this farmer
-        case = await self._get_case_for_farmer(db, case_id, farmer_id)
+        # Verify case belongs to this farmer (or user is agent/admin)
+        case = await self._get_case_for_farmer(db, case_id, farmer_id, user_role=user_role)
 
-        # Verify file exists and belongs to this farmer
+        # Verify file exists and belongs to this user, the case farmer, or privileged role
         file_result = await db.execute(
             select(SystemFile).where(
                 SystemFile.id == payload.file_id,
@@ -200,7 +201,8 @@ class DiagnosisService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "FILE_NOT_FOUND", "message_bn": "ফাইলটি পাওয়া যায়নি।"},
             )
-        if file_record.uploaded_by != farmer_id:
+        allowed_roles = ("agent", "admin", "administrator", "tech_admin", "technical_admin")
+        if file_record.uploaded_by != farmer_id and file_record.uploaded_by != case.farmer_id and user_role not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"code": "FORBIDDEN", "message_bn": "অন্য ব্যবহারকারীর ফাইল যুক্ত করার অনুমতি নেই।"},
@@ -230,7 +232,7 @@ class DiagnosisService:
     # ── AI Analysis ───────────────────────────────────────────────
 
     async def analyze_case(
-        self, db: AsyncSession, case_id: uuid.UUID, farmer_id: uuid.UUID
+        self, db: AsyncSession, case_id: uuid.UUID, farmer_id: uuid.UUID, user_role: str = "farmer"
     ) -> DiagnosisResponse:
         """
         Trigger the full AI analysis pipeline for a diagnosis case.
@@ -247,7 +249,7 @@ class DiagnosisService:
           7. Log status change in case_status_history.
           8. Return diagnosis result.
         """
-        case = await self._get_case_for_farmer(db, case_id, farmer_id)
+        case = await self._get_case_for_farmer(db, case_id, farmer_id, user_role=user_role)
 
         # Prevent duplicate analysis on completed cases
         if case.status in ("ai_analyzed", "expert_reviewed", "closed"):
@@ -654,11 +656,39 @@ class DiagnosisService:
         if not case.assigned_expert_id:
             case.assigned_expert_id = expert_user_id
 
+        # Determine verified_issue_id
+        verified_issue_id = payload.verified_issue_id
+        if payload.agreed_with_ai and not verified_issue_id:
+            pred_res = await db.execute(
+                select(AIPrediction)
+                .where(AIPrediction.case_id == case.id)
+                .order_by(AIPrediction.created_at.desc())
+                .limit(1)
+            )
+            latest_pred = pred_res.scalar_one_or_none()
+            if latest_pred and latest_pred.primary_issue_id:
+                verified_issue_id = latest_pred.primary_issue_id
+
+        # Validate verified_issue_id exists in catalog.issues
+        if verified_issue_id:
+            issue_res = await db.execute(
+                select(Issue).where(
+                    Issue.id == verified_issue_id,
+                    Issue.is_active == True,
+                )
+            )
+            issue_record = issue_res.scalar_one_or_none()
+            if not issue_record:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "ISSUE_NOT_FOUND", "message_bn": "নির্দিষ্ট রোগটি পাওয়া যায়নি বা সক্রিয় নয়।"},
+                )
+
         review = ExpertReview(
             case_id=case.id,
             expert_id=expert_user_id,
             agreed_with_ai=payload.agreed_with_ai,
-            verified_issue_id=payload.verified_issue_id,
+            verified_issue_id=verified_issue_id,
             diagnosis_notes_bn=payload.diagnosis_notes_bn,
             diagnosis_notes_en=payload.diagnosis_notes_en,
             prescribed_treatment_bn=payload.prescribed_treatment_bn,
@@ -670,7 +700,7 @@ class DiagnosisService:
         # If expert disagrees, log model feedback for future retraining
         if not payload.agreed_with_ai:
             pred_result = await db.execute(
-                select(AIPrediction).where(AIPrediction.case_id == case.id).limit(1)
+                select(AIPrediction).where(AIPrediction.case_id == case.id).order_by(AIPrediction.created_at.desc()).limit(1)
             )
             prediction = pred_result.scalar_one_or_none()
             if prediction:
@@ -678,7 +708,7 @@ class DiagnosisService:
                     prediction_id=prediction.id,
                     case_id=case.id,
                     expert_id=expert_user_id,
-                    actual_issue_id=payload.verified_issue_id,
+                    actual_issue_id=verified_issue_id,
                     is_ai_correct=False,
                     feedback_notes=payload.diagnosis_notes_en,
                     created_at=datetime.now(timezone.utc),
@@ -786,13 +816,14 @@ class DiagnosisService:
         db: AsyncSession,
         case_id: uuid.UUID,
         farmer_id: uuid.UUID,
+        user_role: str = "farmer",
     ) -> DiagnosisCase:
         """
         Farmer explicitly requests expert review for an existing case.
         Creates status history log, assigns available expert, creates CaseAssignment,
         and logs audit trail.
         """
-        case = await self._get_case_for_farmer(db, case_id, farmer_id)
+        case = await self._get_case_for_farmer(db, case_id, farmer_id, user_role=user_role)
 
         if case.status not in ("submitted", "ai_analyzed"):
             raise HTTPException(
@@ -854,10 +885,12 @@ class DiagnosisService:
         case_id: uuid.UUID,
         farmer_id: uuid.UUID,
         payload: SubmitFeedbackRequest,
+        user_role: str = "farmer",
     ) -> AdvisoryFeedback:
         """Record farmer's outcome feedback for the advisory received."""
-        # 1. Verify case ownership (farmer can only submit feedback for their own case)
-        await self._get_case_for_farmer(db, case_id, farmer_id)
+        # 1. Verify case ownership (farmer can only submit feedback for their own case, or agent on their behalf)
+        case = await self._get_case_for_farmer(db, case_id, farmer_id, user_role=user_role)
+        target_farmer_id = case.farmer_id
 
         # 2. Find the advisory for this case
         advisory_result = await db.execute(
@@ -874,7 +907,7 @@ class DiagnosisService:
         existing_fb_result = await db.execute(
             select(AdvisoryFeedback).where(
                 AdvisoryFeedback.advisory_id == advisory.id,
-                AdvisoryFeedback.farmer_id == farmer_id,
+                AdvisoryFeedback.farmer_id == target_farmer_id,
             )
         )
         feedback = existing_fb_result.scalar_one_or_none()
@@ -887,7 +920,7 @@ class DiagnosisService:
         else:
             feedback = AdvisoryFeedback(
                 advisory_id=advisory.id,
-                farmer_id=farmer_id,
+                farmer_id=target_farmer_id,
                 rating=payload.rating,
                 is_helpful=payload.is_helpful,
                 feedback_text=payload.feedback_text,
@@ -901,16 +934,17 @@ class DiagnosisService:
     # ── Helpers ───────────────────────────────────────────────────
 
     async def _get_case_for_farmer(
-        self, db: AsyncSession, case_id: uuid.UUID, farmer_id: uuid.UUID
+        self, db: AsyncSession, case_id: uuid.UUID, farmer_id: uuid.UUID, user_role: str = "farmer"
     ) -> DiagnosisCase:
-        """Load a case, verifying it belongs to the requesting farmer."""
-        result = await db.execute(
-            select(DiagnosisCase).where(
-                DiagnosisCase.id == case_id,
-                DiagnosisCase.farmer_id == farmer_id,
-                DiagnosisCase.is_deleted == False,
-            )
+        """Load a case, verifying it belongs to the requesting farmer (or agent/admin/expert)."""
+        stmt = select(DiagnosisCase).where(
+            DiagnosisCase.id == case_id,
+            DiagnosisCase.is_deleted == False,
         )
+        allowed_bypass_roles = ("agent", "admin", "administrator", "tech_admin", "technical_admin", "expert")
+        if user_role not in allowed_bypass_roles:
+            stmt = stmt.where(DiagnosisCase.farmer_id == farmer_id)
+        result = await db.execute(stmt)
         case = result.scalar_one_or_none()
         if not case:
             raise HTTPException(

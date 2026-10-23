@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ─────────────────────────────────────────────────────────
@@ -132,6 +132,12 @@ class SubmitExpertReviewRequest(BaseModel):
     diagnosis_notes_bn: str = Field(..., min_length=10, description="Expert's diagnosis notes in Bangla")
     diagnosis_notes_en: Optional[str] = None
     prescribed_treatment_bn: Optional[str] = Field(None, description="Expert's treatment prescription in Bangla")
+
+    @model_validator(mode="after")
+    def validate_verified_issue_when_disagreeing(self):
+        if not self.agreed_with_ai and not self.verified_issue_id:
+            raise ValueError("AI-এর সাথে দ্বিমত পোষণ করলে সঠিক রোগ (verified_issue_id) উল্লেখ করা বাধ্যতামূলক।")
+        return self
 
 
 class ExpertReviewResponse(BaseModel):

@@ -619,3 +619,457 @@ class TestNewStorageAndInfrastructureFixes:
 
             assert mock_set.called
             assert mock_soft_del.called
+
+
+# ── 5. Agent Multi-Step Workflow, Mapping, ORM & Pagination Tests ───────────
+
+class TestAgentMultiStepWorkflow:
+    @pytest.mark.asyncio
+    async def test_agent_can_attach_image_to_farmers_case(self):
+        """Bug 1.1: Agent can attach images to a case created for a farmer."""
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        farmer_id = uuid.uuid4()
+        agent_id = uuid.uuid4()
+        case_id = uuid.uuid4()
+        file_id = uuid.uuid4()
+
+        case = DiagnosisCase(
+            id=case_id,
+            farmer_id=farmer_id,
+            case_number="KB-2026-000001",
+            status="submitted",
+        )
+        file_record = SystemFile(
+            id=file_id,
+            uploaded_by=agent_id,
+            storage_path="cases/agent_upload.jpg",
+            is_deleted=False,
+        )
+
+        def mock_execute(query, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(query)
+            if "case_mgmt.diagnosis_cases" in q_str or "diagnosis_cases" in q_str:
+                res.scalar_one_or_none.return_value = case
+            elif "system.files" in q_str or "files" in q_str:
+                res.scalar_one_or_none.return_value = file_record
+            else:
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        from app.schemas.diagnosis import AttachCaseImageRequest
+        payload = AttachCaseImageRequest(file_id=file_id, image_type="leaf", is_primary=True)
+
+        attached = await service.attach_image(
+            mock_db, case_id=case_id, farmer_id=agent_id, payload=payload, user_role="agent"
+        )
+        assert attached.case_id == case.id
+        assert attached.file_id == file_id
+
+    @pytest.mark.asyncio
+    async def test_agent_can_analyze_farmers_case(self):
+        """Bug 1.1: Agent can trigger AI analysis on farmer's case."""
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        farmer_id = uuid.uuid4()
+        agent_id = uuid.uuid4()
+        case_id = uuid.uuid4()
+        file_id = uuid.uuid4()
+
+        case = DiagnosisCase(
+            id=case_id,
+            farmer_id=farmer_id,
+            case_number="KB-2026-000002",
+            status="submitted",
+            primary_image_id=file_id,
+            crop_id=uuid.uuid4(),
+        )
+
+        with patch.object(service, "_get_case_for_farmer", new_callable=AsyncMock) as mock_get_case, \
+             patch.object(service, "_call_ai_service", new_callable=AsyncMock) as mock_call_ai, \
+             patch.object(service, "_generate_advisory", new_callable=AsyncMock) as mock_adv:
+
+            mock_get_case.return_value = case
+            mock_call_ai.return_value = {
+                "top_prediction": {"class": "early_blight", "confidence": 0.95},
+                "confidence_score": 0.95,
+                "is_confident": True,
+                "top_predictions": [],
+                "processing_time_ms": 120,
+            }
+            mock_adv.return_value = MagicMock(
+                id=uuid.uuid4(),
+                title_bn="পরামর্শ",
+                summary_bn="সারাংশ",
+                detailed_treatment_bn="চিকিৎসা",
+                preventive_measures_bn="প্রতিরোধ",
+                chemical_recommendations_bn="রাসায়নিক",
+                organic_recommendations_bn="জৈব",
+                source="ai_generated",
+            )
+
+            # mock model, issue, and file
+            model = AIModel(id=uuid.uuid4(), model_code="KB-V1", name="Model", version="1.0", is_active=True)
+            issue = Issue(id=uuid.uuid4(), code="early_blight", name_bn="আর্লি ব্লাইট", name_en="Early Blight", crop_id=case.crop_id, category="disease")
+            img_file = SystemFile(id=file_id, storage_path="cases/img.jpg")
+
+            def mock_execute(query, *args, **kwargs):
+                res = MagicMock()
+                q_str = str(query)
+                if "system.files" in q_str or "files" in q_str:
+                    res.scalar_one_or_none.return_value = img_file
+                elif "ai.models" in q_str:
+                    res.scalar_one_or_none.return_value = model
+                elif "catalog.issues" in q_str:
+                    res.scalar_one_or_none.return_value = issue
+                    res.scalars.return_value.all.return_value = [issue]
+                else:
+                    res.scalar_one_or_none.return_value = None
+                return res
+
+            mock_db.execute.side_effect = mock_execute
+
+            response = await service.analyze_case(mock_db, case_id=case_id, farmer_id=agent_id, user_role="agent")
+            mock_get_case.assert_called_with(mock_db, case_id, agent_id, user_role="agent")
+            assert response.case_id == case.id
+
+    @pytest.mark.asyncio
+    async def test_farmer_ownership_check_blocks_other_farmers(self):
+        """Non-owner farmer cannot access or analyze another farmer's case."""
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        case_id = uuid.uuid4()
+        other_farmer_id = uuid.uuid4()
+
+        def mock_execute(query, *args, **kwargs):
+            res = MagicMock()
+            res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service._get_case_for_farmer(mock_db, case_id=case_id, farmer_id=other_farmer_id, user_role="farmer")
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_agent_can_view_crop_cycles_for_farmers_plot(self):
+        """Bug 1.2: Agent is not blocked by list_crop_cycles."""
+        from app.api.v1.farms import list_crop_cycles
+        from app.models.farm import Plot
+
+        mock_db = AsyncMock()
+        plot_id = uuid.uuid4()
+        farmer_id = uuid.uuid4()
+        agent_user = MagicMock()
+        agent_user.id = uuid.uuid4()
+        agent_user.role_code = "agent"
+        agent_user.role.code = "agent"
+
+        plot = Plot(id=plot_id, user_id=farmer_id, is_deleted=False)
+
+        def mock_execute(query, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(query)
+            if "farm.plots" in q_str or "plots" in q_str:
+                res.scalar_one_or_none.return_value = plot
+            else:
+                res.scalars.return_value.all.return_value = []
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+        resp = await list_crop_cycles(plot_id=plot_id, current_user=agent_user, db=mock_db)
+        assert resp.status_code == 200
+
+
+class TestApiResponseAndDataMapping:
+    def test_submit_expert_review_disagree_requires_verified_issue_id(self):
+        """Bug 2.2: SubmitExpertReviewRequest validates verified_issue_id when agreed_with_ai=False."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError) as exc_info:
+            SubmitExpertReviewRequest(
+                agreed_with_ai=False,
+                verified_issue_id=None,
+                diagnosis_notes_bn="রোগটি আর্লি ব্লাইট নয়, বরং লেট ব্লাইট।",
+            )
+        assert "verified_issue_id" in str(exc_info.value) or "দ্বিমত" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_submit_expert_review_agree_autofills_verified_issue_id(self):
+        """Bug 2.2: When agreed_with_ai=True and verified_issue_id is omitted, autofills from AI prediction."""
+        from app.models.ai import AIPrediction
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        case_id = uuid.uuid4()
+        expert_id = uuid.uuid4()
+        ai_issue_id = uuid.uuid4()
+
+        case = DiagnosisCase(id=case_id, status="escalated", is_deleted=False, assigned_expert_id=expert_id, farmer_id=uuid.uuid4(), case_number="KB-2026-000003")
+        prediction = AIPrediction(id=uuid.uuid4(), case_id=case_id, primary_issue_id=ai_issue_id, created_at=datetime.now(timezone.utc), confidence_score=Decimal("0.90"))
+        issue = Issue(id=ai_issue_id, code="potato_late_blight", name_bn="আলুর নাবি ধসা", name_en="Late Blight", crop_id=uuid.uuid4(), category="disease", is_active=True)
+
+        def mock_execute(query, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(query)
+            if "case_mgmt.diagnosis_cases" in q_str or "diagnosis_cases" in q_str:
+                res.scalar_one_or_none.return_value = case
+            elif "ai.predictions" in q_str or "predictions" in q_str:
+                res.scalar_one_or_none.return_value = prediction
+            elif "catalog.issues" in q_str or "issues" in q_str:
+                res.scalar_one_or_none.return_value = issue
+            elif "case_mgmt.case_assignments" in q_str:
+                res.scalars.return_value.all.return_value = []
+            elif "advisory.advisories" in q_str or "advisories" in q_str:
+                res.scalar_one_or_none.return_value = None
+            else:
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        payload = SubmitExpertReviewRequest(
+            agreed_with_ai=True,
+            verified_issue_id=None,
+            diagnosis_notes_bn="AI নির্ণয় সঠিক হয়েছে। প্রয়োজনীয় সতর্কতা গ্রহণ করুন।",
+        )
+
+        review = await service.submit_expert_review(mock_db, case_id=case_id, expert_user_id=expert_id, payload=payload)
+        assert review.verified_issue_id == ai_issue_id
+
+    @pytest.mark.asyncio
+    async def test_submit_expert_review_invalid_issue_raises_404(self):
+        """Bug 2.2: Submitting a non-existent verified_issue_id raises 404."""
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        case_id = uuid.uuid4()
+        expert_id = uuid.uuid4()
+        case = DiagnosisCase(id=case_id, status="escalated", is_deleted=False, assigned_expert_id=expert_id)
+
+        def mock_execute(query, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(query)
+            if "case_mgmt.diagnosis_cases" in q_str or "diagnosis_cases" in q_str:
+                res.scalar_one_or_none.return_value = case
+            elif "catalog.issues" in q_str or "issues" in q_str:
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        payload = SubmitExpertReviewRequest(
+            agreed_with_ai=False,
+            verified_issue_id=uuid.uuid4(),
+            diagnosis_notes_bn="সঠিক রোগ এটি নয়, ভিন্ন একটি রোগ।",
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.submit_expert_review(mock_db, case_id=case_id, expert_user_id=expert_id, payload=payload)
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_get_case_includes_disease_name_and_images(self):
+        """Bug 2.1 & 3.1: get_case returns issue_name_bn, confidence_level, top_predictions, images."""
+        from app.api.v1.diagnosis import get_case
+        from app.models.ai import AIPrediction, AIPredictionDetail
+        from app.models.diagnosis import CaseImage
+
+        mock_db = AsyncMock()
+        case_id = uuid.uuid4()
+        farmer_id = uuid.uuid4()
+        file_id = uuid.uuid4()
+        issue_id = uuid.uuid4()
+
+        case = DiagnosisCase(
+            id=case_id,
+            case_number="KB-2026-000004",
+            farmer_id=farmer_id,
+            status="ai_analyzed",
+            urgency_level="high",
+            farmer_notes="পাতায় কালো দাগ",
+            is_deleted=False,
+        )
+        case.expert_reviews = []
+        case.advisory = None
+
+        img = CaseImage(
+            id=uuid.uuid4(),
+            case_id=case_id,
+            file_id=file_id,
+            image_type="leaf",
+            is_primary=True,
+            created_at=datetime.now(timezone.utc),
+        )
+        case.images = [img]
+
+        pred = AIPrediction(
+            id=uuid.uuid4(),
+            case_id=case_id,
+            primary_issue_id=issue_id,
+            confidence_score=Decimal("0.92"),
+            is_confident=True,
+            created_at=datetime.now(timezone.utc),
+        )
+        pred_detail = AIPredictionDetail(
+            id=uuid.uuid4(),
+            prediction_id=pred.id,
+            issue_id=issue_id,
+            class_label="potato_late_blight",
+            rank_order=1,
+            confidence_score=Decimal("0.92"),
+            created_at=datetime.now(timezone.utc),
+        )
+        pred.details = [pred_detail]
+        case.predictions = [pred]
+
+        issue = Issue(
+            id=issue_id,
+            code="potato_late_blight",
+            name_bn="আলুর নাবি ধসা",
+            name_en="Late Blight",
+            crop_id=uuid.uuid4(),
+            category="disease",
+        )
+
+        def mock_execute(query, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(query)
+            if "case_mgmt.diagnosis_cases" in q_str or "diagnosis_cases" in q_str:
+                res.scalar_one_or_none.return_value = case
+            elif "catalog.issues" in q_str or "issues" in q_str:
+                res.scalar_one_or_none.return_value = issue
+            else:
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        user = MagicMock()
+        user.id = farmer_id
+        user.role_code = "farmer"
+        user.role.code = "farmer"
+
+        resp = await get_case(case_id=case_id, current_user=user, db=mock_db)
+        import json
+        body = json.loads(resp.body)
+        data = body["data"]
+
+        assert data["issue_id"] == str(issue_id)
+        assert data["issue_name_bn"] == "আলুর নাবি ধসা"
+        assert data["issue_name_en"] == "Late Blight"
+        assert data["confidence_level"] == "high"
+        assert len(data["top_predictions"]) == 1
+        assert len(data["images"]) == 1
+        assert data["images"][0]["file_id"] == str(file_id)
+
+
+class TestOrmAndFileViewUrlAuthorization:
+    @pytest.mark.asyncio
+    async def test_expert_and_agent_can_access_view_url(self):
+        """Bug 3.2: Expert and agent can generate view URL for farmer's uploaded image."""
+        from app.api.v1.files import get_view_url
+        from app.services.storage_service import storage_service
+
+        mock_db = AsyncMock()
+        file_id = uuid.uuid4()
+        farmer_id = uuid.uuid4()
+
+        file_record = SystemFile(
+            id=file_id,
+            uploaded_by=farmer_id,
+            storage_path="cases/crop.jpg",
+            is_deleted=False,
+        )
+
+        def mock_execute(query, *args, **kwargs):
+            res = MagicMock()
+            res.scalar_one_or_none.return_value = file_record
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        with patch.object(storage_service, "generate_view_url", return_value="https://storage.example.com/view/crop.jpg"):
+            # Test Expert
+            expert_user = MagicMock()
+            expert_user.id = uuid.uuid4()
+            expert_user.role_code = "expert"
+            expert_user.role.code = "expert"
+
+            resp_expert = await get_view_url(file_id=file_id, current_user=expert_user, db=mock_db)
+            assert resp_expert.status_code == 200
+
+            # Test Agent
+            agent_user = MagicMock()
+            agent_user.id = uuid.uuid4()
+            agent_user.role_code = "agent"
+            agent_user.role.code = "agent"
+
+            resp_agent = await get_view_url(file_id=file_id, current_user=agent_user, db=mock_db)
+            assert resp_agent.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_user_cannot_access_view_url(self):
+        """Bug 3.2: Another random farmer cannot view someone else's file."""
+        from app.api.v1.files import get_view_url
+
+        mock_db = AsyncMock()
+        file_id = uuid.uuid4()
+        file_record = SystemFile(
+            id=file_id,
+            uploaded_by=uuid.uuid4(),
+            storage_path="cases/crop.jpg",
+            is_deleted=False,
+        )
+
+        def mock_execute(query, *args, **kwargs):
+            res = MagicMock()
+            res.scalar_one_or_none.return_value = file_record
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        other_farmer = MagicMock()
+        other_farmer.id = uuid.uuid4()
+        other_farmer.role_code = "farmer"
+        other_farmer.role.code = "farmer"
+
+        resp = await get_view_url(file_id=file_id, current_user=other_farmer, db=mock_db)
+        assert resp.status_code == 403
+
+
+class TestPaginationEdgeCases:
+    @pytest.mark.asyncio
+    async def test_pagination_parameters_apply_limit_and_offset(self):
+        """Bug 4.1: list_cases, get_expert_cases, and list_farms accept limit and offset."""
+        from app.api.v1.diagnosis import list_cases, get_expert_cases
+        from app.api.v1.farms import list_farms
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_db.execute.return_value = mock_result
+
+        user = MagicMock()
+        user.id = uuid.uuid4()
+        user.role_code = "admin"
+        user.role.code = "admin"
+
+        # list_cases
+        resp1 = await list_cases(limit=10, offset=5, current_user=user, db=mock_db)
+        assert resp1.status_code == 200
+
+        # get_expert_cases
+        resp2 = await get_expert_cases(limit=25, offset=10, current_user=user, db=mock_db)
+        assert resp2.status_code == 200
+
+        # list_farms
+        resp3 = await list_farms(limit=15, offset=0, current_user=user, db=mock_db)
+        assert resp3.status_code == 200

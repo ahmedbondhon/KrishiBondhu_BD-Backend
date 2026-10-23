@@ -87,6 +87,7 @@ class AIPrediction(Base, UUIDPrimaryKeyMixin):
     model: Mapped["AIModel"] = relationship("AIModel", back_populates="predictions")
     details: Mapped[List["AIPredictionDetail"]] = relationship("AIPredictionDetail", back_populates="prediction")
     case: Mapped["DiagnosisCase"] = relationship("DiagnosisCase", back_populates="predictions")
+    primary_issue: Mapped[Optional["Issue"]] = relationship("Issue", foreign_keys=[primary_issue_id])
 
 
 class AIPredictionDetail(Base, UUIDPrimaryKeyMixin):
@@ -110,6 +111,7 @@ class AIPredictionDetail(Base, UUIDPrimaryKeyMixin):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     prediction: Mapped["AIPrediction"] = relationship("AIPrediction", back_populates="details")
+    issue: Mapped[Optional["Issue"]] = relationship("Issue", foreign_keys=[issue_id])
 
 
 class AIModelFeedback(Base, UUIDPrimaryKeyMixin):
@@ -133,3 +135,4 @@ class AIModelFeedback(Base, UUIDPrimaryKeyMixin):
 
 # Avoid circular import
 from app.models.diagnosis import DiagnosisCase  # noqa: E402
+from app.models.catalog import Issue  # noqa: E402
