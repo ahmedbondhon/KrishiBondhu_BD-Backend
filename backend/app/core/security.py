@@ -30,7 +30,7 @@ from app.core.config import settings
 
 # --- Password Hashing ---
 try:
-    import argon2
+    import argon2  # type: ignore[import-untyped,import-not-found]
     pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
 except ImportError:
     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
