@@ -5,7 +5,7 @@ Pydantic v2 schemas for diagnosis case, AI analysis, and advisory response endpo
 """
 
 from decimal import Decimal
-from typing import List, Optional
+from typing import List, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -40,7 +40,9 @@ class AttachCaseImageRequest(BaseModel):
     Attach an already-uploaded file (from the /files flow) to a case.
     """
     file_id: UUID = Field(..., description="ID of the uploaded file (from /files/confirm-upload)")
-    image_type: str = Field(default="leaf", description="Type: leaf | stem | fruit | root | whole_plant")
+    image_type: Literal["leaf", "stem", "fruit", "root", "whole_plant"] = Field(
+        default="leaf", description="Type: leaf | stem | fruit | root | whole_plant"
+    )
     is_primary: bool = Field(default=False, description="Is this the main image for AI analysis?")
 
 
@@ -161,4 +163,17 @@ class SubmitFeedbackRequest(BaseModel):
     rating: Optional[int] = Field(None, ge=1, le=5)
     is_helpful: Optional[bool] = None
     feedback_text: Optional[str] = Field(None, max_length=1000)
-    outcome_status: Optional[str] = Field(None, description="resolved | partially_resolved | ineffective")
+    outcome_status: Optional[Literal["resolved", "partially_resolved", "ineffective"]] = Field(
+        None, description="resolved | partially_resolved | ineffective"
+    )
+
+    @model_validator(mode="after")
+    def validate_non_empty_feedback(self):
+        if (
+            self.rating is None
+            and self.is_helpful is None
+            and (self.feedback_text is None or not self.feedback_text.strip())
+            and self.outcome_status is None
+        ):
+            raise ValueError("কমপক্ষে একটি ফিডব্যাক তথ্য (rating, is_helpful, feedback_text, অথবা outcome_status) প্রদান করা আবশ্যক।")
+        return self

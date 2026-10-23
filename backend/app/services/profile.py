@@ -45,7 +45,15 @@ class ProfileService:
 
         avatar_url = user.avatar_url
         if avatar_url and not avatar_url.startswith(("http://", "https://")):
-            avatar_url = f"{settings.public_base_url.rstrip('/')}/{avatar_url.lstrip('/')}"
+            clean_path = avatar_url.lstrip("/")
+            # Ensure static mount path prefix (/static/) is included for relative avatar paths
+            if clean_path.startswith("avatars/"):
+                clean_path = f"static/{clean_path}"
+            elif clean_path.startswith("uploads/"):
+                clean_path = f"static/{clean_path[8:]}"
+            elif not clean_path.startswith("static/"):
+                clean_path = f"static/{clean_path}"
+            avatar_url = f"{settings.public_base_url.rstrip('/')}/{clean_path}"
 
         return ProfileResponse(
             id=user.id,

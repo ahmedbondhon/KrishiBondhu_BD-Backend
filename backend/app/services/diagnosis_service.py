@@ -173,6 +173,16 @@ class DiagnosisService:
             status="submitted",
         )
         db.add(case)
+        db.add(
+            AuditLog(
+                user_id=farmer_id,
+                action="DIAGNOSIS_SUBMITTED",
+                entity_name="case_mgmt.diagnosis_cases",
+                entity_id=case.id,
+                new_data={"case_id": str(case.id), "case_number": case.case_number},
+                created_at=datetime.now(timezone.utc),
+            )
+        )
         await db.flush()
         return case
 
@@ -207,6 +217,19 @@ class DiagnosisService:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={"code": "FORBIDDEN", "message_bn": "অন্য ব্যবহারকারীর ফাইল যুক্ত করার অনুমতি নেই।"},
+            )
+
+        # Check if file is already attached to another case
+        already_attached = await db.execute(
+            select(CaseImage).where(
+                CaseImage.file_id == payload.file_id,
+                CaseImage.case_id != case.id,
+            )
+        )
+        if already_attached.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "FILE_ALREADY_ATTACHED", "message_bn": "এই ফাইলটি ইতিমধ্যে অন্য একটি কেসে যুক্ত করা হয়েছে।"},
             )
 
         # If this image is primary, reset any previous primary images for this case
@@ -330,6 +353,16 @@ class DiagnosisService:
                 created_at=datetime.now(timezone.utc),
             )
             db.add(prediction)
+            db.add(
+                AuditLog(
+                    user_id=farmer_id,
+                    action="AI_PREDICTION_MADE",
+                    entity_name="ai.predictions",
+                    entity_id=prediction.id,
+                    new_data={"case_id": str(case.id), "confidence_score": float(confidence_score), "is_confident": is_confident},
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
             await db.flush()
 
             # Resolve issue_ids for top_predictions (Bug 3.1)
@@ -371,8 +404,30 @@ class DiagnosisService:
                 )
                 await self._update_status(db, case, "ai_analyzed", notes="High/medium confidence — advisory generated")
                 case.urgency_level = ai_result.get("urgency_level", "medium")
+                case.resolved_at = datetime.now(timezone.utc)
 
                 if advisory:
+                    db.add(
+                        AuditLog(
+                            user_id=farmer_id,
+                            action="ADVISORY_PUBLISHED",
+                            entity_name="advisories",
+                            entity_id=advisory.id,
+                            new_data={"case_id": str(case.id), "title_bn": advisory.title_bn},
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    db.add(
+                        Notification(
+                            user_id=case.farmer_id,
+                            notification_type="case_status_changed",
+                            title_bn="কেস বিশ্লেষণ সম্পন্ন",
+                            body_bn="আপনার ফসলের রোগ নির্ণয় সফলভাবে সম্পন্ন হয়েছে এবং পরামর্শ প্রদান করা হয়েছে।",
+                            entity_type="diagnosis_case",
+                            entity_id=case.id,
+                            created_at=datetime.now(timezone.utc),
+                        )
+                    )
                     advisory_payload = {
                         "title_bn": advisory.title_bn,
                         "summary_bn": advisory.summary_bn,
@@ -397,6 +452,50 @@ class DiagnosisService:
                     notes="Low confidence — escalated to expert review queue"
                 )
                 case.urgency_level = "high"  # Conservative: treat unknown as urgent
+
+                # Auto-assign available expert if not yet assigned
+                if not case.assigned_expert_id:
+                    expert_query = (
+                        select(ExpertProfile)
+                        .where(ExpertProfile.is_available == True)
+                        .order_by(ExpertProfile.rating.desc())
+                        .limit(1)
+                    )
+                    expert_result = await db.execute(expert_query)
+                    expert_profile = expert_result.scalar_one_or_none()
+                    if expert_profile and hasattr(expert_profile, "user_id") and isinstance(expert_profile, ExpertProfile):
+                        case.assigned_expert_id = expert_profile.user_id
+                        assignment = CaseAssignment(
+                            case_id=case.id,
+                            expert_id=expert_profile.user_id,
+                            assigned_by=farmer_id,
+                            status="assigned",
+                            assigned_at=datetime.now(timezone.utc),
+                        )
+                        db.add(assignment)
+                        db.add(
+                            Notification(
+                                user_id=expert_profile.user_id,
+                                notification_type="case_assigned",
+                                title_bn="নতুন কেস বরাদ্দ",
+                                body_bn=f"কেস {case.case_number} আপনার পর্যালোচনার জন্য বরাদ্দ করা হয়েছে।",
+                                entity_type="diagnosis_case",
+                                entity_id=case.id,
+                                created_at=datetime.now(timezone.utc),
+                            )
+                        )
+
+                db.add(
+                    Notification(
+                        user_id=case.farmer_id,
+                        notification_type="case_status_changed",
+                        title_bn="কেস বিশেষজ্ঞের কাছে পাঠানো হয়েছে",
+                        body_bn=f"কেস {case.case_number} বিশেষজ্ঞের পর্যালোচনার জন্য পাঠানো হয়েছে।",
+                        entity_type="diagnosis_case",
+                        entity_id=case.id,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                )
 
             # Build top predictions list for response
             top_preds = [
@@ -624,8 +723,10 @@ class DiagnosisService:
         self,
         db: AsyncSession,
         case_id: uuid.UUID,
-        expert_user_id: uuid.UUID,
-        payload: SubmitExpertReviewRequest,
+        expert_user_id: Optional[uuid.UUID] = None,
+        payload: Optional[SubmitExpertReviewRequest] = None,
+        expert_id: Optional[uuid.UUID] = None,
+        **kwargs,
     ) -> ExpertReview:
         """
         Expert submits a review for a case.
@@ -634,6 +735,10 @@ class DiagnosisService:
         The original AIPrediction is NEVER modified.
         If expert disagrees, a model_feedback record is also created.
         """
+        expert_user_id = expert_user_id or expert_id
+        if not expert_user_id or not payload:
+            raise HTTPException(status_code=400, detail={"code": "INVALID_ARGUMENTS"})
+
         case_result = await db.execute(
             select(DiagnosisCase).where(
                 DiagnosisCase.id == case_id,
@@ -664,6 +769,9 @@ class DiagnosisService:
 
         if not case.assigned_expert_id:
             case.assigned_expert_id = expert_user_id
+
+        # Set resolved_at timestamp
+        case.resolved_at = datetime.now(timezone.utc)
 
         # Determine verified_issue_id
         verified_issue_id = payload.verified_issue_id
@@ -784,6 +892,16 @@ class DiagnosisService:
             advisory.summary_bn = summary_bn
             advisory.title_bn = title
             advisory.is_published = True
+
+            db.add(Notification(
+                user_id=case.farmer_id,
+                notification_type="advisory_updated",
+                title_bn="পরামর্শ আপডেট হয়েছে",
+                body_bn=f"কেস {case.case_number}-এর চিকিৎসা পরামর্শ বিশেষজ্ঞ দ্বারা আপডেট করা হয়েছে।",
+                entity_type="diagnosis_case",
+                entity_id=case.id,
+                created_at=datetime.now(timezone.utc),
+            ))
         else:
             pred_res = await db.execute(
                 select(AIPrediction).where(AIPrediction.case_id == case.id).order_by(AIPrediction.created_at.desc()).limit(1)
@@ -853,14 +971,44 @@ class DiagnosisService:
             notes="Farmer requested expert review",
         )
 
-        # Attempt to assign an available expert
-        expert_result = await db.execute(
-            select(ExpertProfile)
-            .where(ExpertProfile.is_available == True)
-            .order_by(ExpertProfile.rating.desc())
+        # Attempt to assign an available expert who hasn't exceeded max_active_cases
+        from sqlalchemy import func
+        # Find active pending assignments per expert
+        active_counts_subq = (
+            select(
+                CaseAssignment.expert_id,
+                func.count(CaseAssignment.id).label("active_case_count")
+            )
+            .join(DiagnosisCase, CaseAssignment.case_id == DiagnosisCase.id)
+            .where(
+                CaseAssignment.status.in_(["assigned", "in_progress", "pending"]),
+                DiagnosisCase.is_deleted == False,
+                DiagnosisCase.status.in_(["escalated", "assigned", "in_review"]),
+            )
+            .group_by(CaseAssignment.expert_id)
+            .subquery()
+        )
+
+        expert_query = (
+            select(
+                ExpertProfile,
+                func.coalesce(active_counts_subq.c.active_case_count, 0).label("active_count")
+            )
+            .outerjoin(active_counts_subq, ExpertProfile.user_id == active_counts_subq.c.expert_id)
+            .where(
+                ExpertProfile.is_available == True,
+                func.coalesce(active_counts_subq.c.active_case_count, 0) < ExpertProfile.max_active_cases,
+            )
+            .order_by(
+                func.coalesce(active_counts_subq.c.active_case_count, 0).asc(),  # Load balancing: least busy first
+                ExpertProfile.rating.desc(),
+            )
             .limit(1)
         )
-        expert_profile = expert_result.scalar_one_or_none()
+
+        expert_result = await db.execute(expert_query)
+        expert_row = expert_result.first()
+        expert_profile = expert_row[0] if expert_row else None
         if expert_profile:
             case.assigned_expert_id = expert_profile.user_id
             assignment = CaseAssignment(
@@ -871,6 +1019,29 @@ class DiagnosisService:
                 assigned_at=datetime.now(timezone.utc),
             )
             db.add(assignment)
+            db.add(
+                Notification(
+                    user_id=expert_profile.user_id,
+                    notification_type="case_assigned",
+                    title_bn="নতুন কেস বরাদ্দ",
+                    body_bn=f"কেস {case.case_number} আপনার পর্যালোচনার জন্য বরাদ্দ করা হয়েছে।",
+                    entity_type="diagnosis_case",
+                    entity_id=case.id,
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+
+        db.add(
+            Notification(
+                user_id=case.farmer_id,
+                notification_type="case_status_changed",
+                title_bn="কেস বিশেষজ্ঞের কাছে পাঠানো হয়েছে",
+                body_bn=f"কেস {case.case_number} বিশেষজ্ঞের পর্যালোচনার জন্য পাঠানো হয়েছে।",
+                entity_type="diagnosis_case",
+                entity_id=case.id,
+                created_at=datetime.now(timezone.utc),
+            )
+        )
 
         # Audit log
         db.add(
@@ -1015,6 +1186,19 @@ class DiagnosisService:
             )
             files_to_cleanup = files_res.scalars().all()
             for f in files_to_cleanup:
+                # Check if this file is still attached to any other active case
+                other_case_using = await db.execute(
+                    select(CaseImage)
+                    .join(DiagnosisCase, CaseImage.case_id == DiagnosisCase.id)
+                    .where(
+                        CaseImage.file_id == f.id,
+                        CaseImage.case_id != case.id,
+                        DiagnosisCase.is_deleted == False,
+                    )
+                )
+                if other_case_using.scalar_one_or_none():
+                    continue  # Still referenced by another active case; do not delete
+
                 f.is_deleted = True
                 f.deleted_at = now_utc
                 # Background cleanup from storage provider

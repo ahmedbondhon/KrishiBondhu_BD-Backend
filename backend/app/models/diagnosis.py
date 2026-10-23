@@ -151,6 +151,7 @@ class ExpertReview(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     reviewed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     case: Mapped["DiagnosisCase"] = relationship("DiagnosisCase", back_populates="expert_reviews")
+    expert: Mapped[Optional["User"]] = relationship("User", foreign_keys=[expert_id])
 
 
 class CaseAssignment(Base, UUIDPrimaryKeyMixin):
@@ -173,3 +174,4 @@ class CaseAssignment(Base, UUIDPrimaryKeyMixin):
 from app.models.ai import AIPrediction  # noqa: E402
 from app.models.advisory import Advisory  # noqa: E402
 from app.models.system import SystemFile  # noqa: E402
+from app.models.auth import User  # noqa: E402

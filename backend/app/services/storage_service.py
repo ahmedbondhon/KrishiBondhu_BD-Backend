@@ -24,7 +24,7 @@ Why not upload through the backend?
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 try:
     import boto3
@@ -172,16 +172,28 @@ class StorageService:
             ExpiresIn=settings.storage_signed_url_expiry_seconds,
         )
 
-    def _check_file_exists_sync(self, storage_path: str) -> bool:
+    def _get_file_metadata_sync(self, storage_path: str) -> Optional[dict[str, Any]]:
         try:
             client = self._get_s3_client()
-            client.head_object(
+            resp = client.head_object(
                 Bucket=settings.storage_bucket_name,
                 Key=storage_path,
             )
-            return True
+            return {
+                "content_length": resp.get("ContentLength", 0),
+                "content_type": resp.get("ContentType", ""),
+            }
         except Exception:
-            return False
+            return None
+
+    async def get_file_metadata(self, storage_path: str) -> Optional[dict[str, Any]]:
+        """Retrieve real object metadata (ContentLength, ContentType) from storage."""
+        import asyncio
+        return await asyncio.to_thread(self._get_file_metadata_sync, storage_path)
+
+    def _check_file_exists_sync(self, storage_path: str) -> bool:
+        meta = self._get_file_metadata_sync(storage_path)
+        return meta is not None
 
     async def check_file_exists(self, storage_path: str) -> bool:
         """

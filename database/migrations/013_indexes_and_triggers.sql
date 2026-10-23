@@ -95,6 +95,29 @@ CREATE TRIGGER trigger_case_mgmt_diagnosis_cases_case_number
 
 
 -- ============================================================================
+-- 1.2 AUTOMATED POSTGIS LOCATION POPULATION TRIGGER FOR diagnosis_cases
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION case_mgmt.sync_diagnosis_case_location()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.longitude IS NOT NULL AND NEW.latitude IS NOT NULL THEN
+        NEW.location := ST_SetSRID(ST_MakePoint(NEW.longitude::DOUBLE PRECISION, NEW.latitude::DOUBLE PRECISION), 4326);
+    ELSE
+        NEW.location := NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trigger_sync_diagnosis_case_location ON case_mgmt.diagnosis_cases;
+CREATE TRIGGER trigger_sync_diagnosis_case_location
+    BEFORE INSERT OR UPDATE OF latitude, longitude ON case_mgmt.diagnosis_cases
+    FOR EACH ROW
+    EXECUTE FUNCTION case_mgmt.sync_diagnosis_case_location();
+
+
+-- ============================================================================
 -- 2. FOREIGN KEY B-TREE INDEXES
 -- ============================================================================
 

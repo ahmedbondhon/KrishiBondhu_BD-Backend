@@ -81,7 +81,8 @@ async def get_current_user(
     )
     user = result.scalar_one_or_none()
 
-    if user is None or not user.is_active or user.is_deleted:
+    status_val = getattr(user, "effective_status", getattr(user, "status", "active"))
+    if user is None or not user.is_active or user.is_deleted or status_val != "active":
         raise credentials_exception
 
     return user

@@ -13,6 +13,7 @@ All routes require authentication (JWT Bearer token).
 Only the plot owner can access their own plots (enforced in service layer).
 """
 
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -25,7 +26,14 @@ from app.models.auth import User
 from app.models.catalog import Crop, CropVariety, GrowthStage
 from app.models.farm import Plot, PlotCrop
 from app.models.geo import District, Division, Union, Upazila
-from app.schemas.farm import CreatePlotCropRequest, CreatePlotRequest, PlotCropResponse, PlotResponse
+from app.schemas.farm import (
+    CreatePlotCropRequest,
+    CreatePlotRequest,
+    PlotCropResponse,
+    PlotResponse,
+    UpdatePlotCropRequest,
+    UpdatePlotRequest,
+)
 
 router = APIRouter(prefix="/farms", tags=["Farms & Crop Cycles"])
 
@@ -241,4 +249,185 @@ async def list_crop_cycles(
     return success_response(
         data=[PlotCropResponse.model_validate(c).model_dump() for c in cycles],
         message=f"{len(cycles)}টি ফসল চক্র পাওয়া গেছে।",
+    )
+
+
+@router.patch("/{plot_id}", summary="Update a farm plot")
+@router.put("/{plot_id}", summary="Update a farm plot")
+async def update_farm(
+    plot_id: UUID,
+    payload: UpdatePlotRequest,
+    current_user: User = Depends(require_roles("farmer", "agent", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update plot information and geographic location."""
+    plot_stmt = select(Plot).where(Plot.id == plot_id, Plot.is_deleted == False)
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    if user_role not in ("admin", "administrator", "tech_admin", "technical_admin", "agent"):
+        plot_stmt = plot_stmt.where(Plot.user_id == current_user.id)
+    plot = await db.scalar(plot_stmt)
+    if not plot:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "PLOT_NOT_FOUND", "message_bn": "জমিটি পাওয়া যায়নি।"},
+        )
+
+    # Validate geo hierarchy if updated
+    div_id = payload.division_id if payload.division_id is not None else plot.division_id
+    dist_id = payload.district_id if payload.district_id is not None else plot.district_id
+    upz_id = payload.upazila_id if payload.upazila_id is not None else plot.upazila_id
+    uni_id = payload.union_id if payload.union_id is not None else plot.union_id
+
+    if payload.division_id:
+        div = await db.scalar(select(Division.id).where(Division.id == payload.division_id, Division.is_active == True))
+        if not div:
+            raise HTTPException(status_code=400, detail={"code": "INVALID_GEO", "message_bn": "বিভাগটি খুঁজে পাওয়া যায়নি।"})
+
+    if payload.district_id:
+        dist_stmt = select(District.id).where(District.id == payload.district_id, District.is_active == True)
+        if div_id:
+            dist_stmt = dist_stmt.where(District.division_id == div_id)
+        if not await db.scalar(dist_stmt):
+            raise HTTPException(status_code=400, detail={"code": "INVALID_GEO", "message_bn": "জেলাটি নির্বাচিত বিভাগের আওতাভুক্ত নয়।"})
+
+    if payload.upazila_id:
+        upz_stmt = select(Upazila.id).where(Upazila.id == payload.upazila_id, Upazila.is_active == True)
+        if dist_id:
+            upz_stmt = upz_stmt.where(Upazila.district_id == dist_id)
+        if not await db.scalar(upz_stmt):
+            raise HTTPException(status_code=400, detail={"code": "INVALID_GEO", "message_bn": "উপজেলাটি নির্বাচিত জেলার আওতাভুক্ত নয়।"})
+
+    if payload.union_id:
+        union_stmt = select(Union.id).where(Union.id == payload.union_id, Union.is_active == True)
+        if upz_id:
+            union_stmt = union_stmt.where(Union.upazila_id == upz_id)
+        if not await db.scalar(union_stmt):
+            raise HTTPException(status_code=400, detail={"code": "INVALID_GEO", "message_bn": "ইউনিয়নটি নির্বাচিত উপজেলার আওতাভুক্ত নয়।"})
+
+    if payload.name is not None:
+        plot.name = payload.name
+    if payload.area_bigha is not None:
+        plot.area_bigha = payload.area_bigha
+    if payload.area_sqm is not None:
+        plot.area_sqm = payload.area_sqm
+    if payload.soil_type is not None:
+        plot.soil_type = payload.soil_type
+    if payload.irrigation_source is not None:
+        plot.irrigation_source = payload.irrigation_source
+    if payload.division_id is not None:
+        plot.division_id = payload.division_id
+    if payload.district_id is not None:
+        plot.district_id = payload.district_id
+    if payload.upazila_id is not None:
+        plot.upazila_id = payload.upazila_id
+    if payload.union_id is not None:
+        plot.union_id = payload.union_id
+
+    plot.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+
+    return success_response(
+        data=PlotResponse.model_validate(plot).model_dump(),
+        message="জমির তথ্য সফলভাবে হালনাগাদ করা হয়েছে।",
+    )
+
+
+@router.delete("/{plot_id}", summary="Soft delete a farm plot")
+async def delete_farm(
+    plot_id: UUID,
+    current_user: User = Depends(require_roles("farmer", "agent", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Soft delete a plot owned by the current farmer (or by agent/admin)."""
+    plot_stmt = select(Plot).where(Plot.id == plot_id, Plot.is_deleted == False)
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    if user_role not in ("admin", "administrator", "tech_admin", "technical_admin", "agent"):
+        plot_stmt = plot_stmt.where(Plot.user_id == current_user.id)
+    plot = await db.scalar(plot_stmt)
+    if not plot:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "PLOT_NOT_FOUND", "message_bn": "জমিটি পাওয়া যায়নি।"},
+        )
+
+    now_utc = datetime.now(timezone.utc)
+    plot.is_deleted = True
+    plot.is_active = False
+    plot.deleted_at = now_utc
+
+    # Soft delete associated crop cycles
+    cycles_res = await db.execute(select(PlotCrop).where(PlotCrop.plot_id == plot.id, PlotCrop.is_deleted == False))
+    for c in cycles_res.scalars().all():
+        c.is_deleted = True
+        c.deleted_at = now_utc
+
+    await db.flush()
+    return success_response(data={"id": str(plot.id), "is_deleted": True}, message="জমি সফলভাবে মুছে ফেলা হয়েছে।")
+
+
+@router.patch("/{plot_id}/crop-cycles/{cycle_id}", summary="Update a crop cycle (growth stage, harvest, yield)")
+async def update_crop_cycle(
+    plot_id: UUID,
+    cycle_id: UUID,
+    payload: UpdatePlotCropRequest,
+    current_user: User = Depends(require_roles("farmer", "agent", "admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Update a crop cultivation cycle: e.g. update growth stage, record actual harvest date, yield, or change status to 'harvested'.
+    """
+    plot_stmt = select(Plot).where(Plot.id == plot_id, Plot.is_deleted == False)
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    if user_role not in ("admin", "administrator", "tech_admin", "technical_admin", "agent"):
+        plot_stmt = plot_stmt.where(Plot.user_id == current_user.id)
+    plot = await db.scalar(plot_stmt)
+    if not plot:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "PLOT_NOT_FOUND", "message_bn": "জমিটি পাওয়া যায়নি।"},
+        )
+
+    cycle_stmt = select(PlotCrop).where(
+        PlotCrop.id == cycle_id,
+        PlotCrop.plot_id == plot_id,
+        PlotCrop.is_deleted == False,
+    )
+    cycle = await db.scalar(cycle_stmt)
+    if not cycle:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "CROP_CYCLE_NOT_FOUND", "message_bn": "ফসল চক্রটি পাওয়া যায়নি।"},
+        )
+
+    if payload.current_stage_id:
+        stage = await db.scalar(
+            select(GrowthStage.id).where(
+                GrowthStage.id == payload.current_stage_id,
+                GrowthStage.crop_id == cycle.crop_id,
+            )
+        )
+        if not stage:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_GROWTH_STAGE", "message_bn": "বৃদ্ধির পর্যায়টি নির্বাচিত ফসলের সাথে মেলে না।"},
+            )
+        cycle.current_stage_id = payload.current_stage_id
+
+    if payload.expected_harvest_date is not None:
+        cycle.expected_harvest_date = payload.expected_harvest_date
+    if payload.actual_harvest_date is not None:
+        cycle.actual_harvest_date = payload.actual_harvest_date
+    if payload.status is not None:
+        cycle.status = payload.status
+    if payload.yield_kg is not None:
+        cycle.yield_kg = payload.yield_kg
+    if payload.notes is not None:
+        cycle.notes = payload.notes
+
+    cycle.updated_at = datetime.now(timezone.utc)
+    await db.flush()
+
+    return success_response(
+        data=PlotCropResponse.model_validate(cycle).model_dump(),
+        message="ফসল চক্র সফলভাবে হালনাগাদ করা হয়েছে।",
     )

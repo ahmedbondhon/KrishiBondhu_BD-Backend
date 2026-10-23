@@ -7,23 +7,23 @@
 -- ============================================================================
 
 -- 1. Seed Roles (auth.roles)
-INSERT INTO auth.roles (code, name, description)
+INSERT INTO auth.roles (id, code, name, description)
 VALUES 
-    ('farmer', 'Farmer', 'Smallholder farmer accessing ChashiGuard diagnosis and advisories'),
-    ('expert', 'Agricultural Expert', 'DAE/BARI agricultural extension officer providing expert reviews'),
-    ('agent', 'Call Center Agent', 'Assisted channel call center operator'),
-    ('admin', 'System Administrator', 'Platform and system administrator')
+    ('11000000-0000-0000-0000-000000000001', 'farmer', 'Farmer', 'Smallholder farmer accessing ChashiGuard diagnosis and advisories'),
+    ('11000000-0000-0000-0000-000000000002', 'expert', 'Agricultural Expert', 'DAE/BARI agricultural extension specialist providing expert reviews'),
+    ('11000000-0000-0000-0000-000000000003', 'agent', 'Call Center Agent', 'Assisted channel call center operator'),
+    ('11000000-0000-0000-0000-000000000004', 'admin', 'System Administrator', 'Platform and system administrator')
 ON CONFLICT (code) DO UPDATE SET 
     name = EXCLUDED.name,
     description = EXCLUDED.description;
 
 -- 2. Seed Consent Types (auth.consent_types)
-INSERT INTO auth.consent_types (code, title, description, is_mandatory)
+INSERT INTO auth.consent_types (id, code, title, description, is_mandatory)
 VALUES 
-    ('terms_of_service', 'Terms of Service', 'Consent to platform terms of service and usage conditions', TRUE),
-    ('privacy_policy', 'Privacy Policy', 'Consent to personal data processing for advisory delivery', TRUE),
-    ('voice_recording', 'Voice Recording Consent', 'Consent to record audio queries for advisory generation', FALSE),
-    ('location_data', 'Location Data Access', 'Consent to capture GPS coordinates for regional weather and pest tracking', TRUE)
+    ('12000000-0000-0000-0000-000000000001', 'terms_of_service', 'Terms of Service', 'Consent to platform terms of service and usage conditions', TRUE),
+    ('12000000-0000-0000-0000-000000000002', 'privacy_policy', 'Privacy Policy', 'Consent to personal data processing for advisory delivery', TRUE),
+    ('12000000-0000-0000-0000-000000000003', 'voice_recording', 'Voice Recording Consent', 'Consent to record audio queries for advisory generation', FALSE),
+    ('12000000-0000-0000-0000-000000000004', 'location_data', 'Location Data Access', 'Consent to capture GPS coordinates for regional weather and pest tracking', TRUE)
 ON CONFLICT (code) DO UPDATE SET 
     title = EXCLUDED.title,
     description = EXCLUDED.description,

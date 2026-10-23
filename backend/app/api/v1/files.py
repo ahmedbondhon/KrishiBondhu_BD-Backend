@@ -48,11 +48,24 @@ from app.schemas.files import (
 from app.services.storage_service import storage_service
 from app.core.config import settings
 
+# 5 MB maximum allowed file size
+MAX_FILE_SIZE_BYTES: int = getattr(settings, "max_file_size_bytes", 5 * 1024 * 1024)
+
 router = APIRouter(prefix="/files", tags=["File Storage"])
 
-# Allowed MIME types for crop disease images
-ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
-MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
+# Allowed MIME types for crop disease images and expert/farmer audio voice notes
+ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+ALLOWED_AUDIO_MIME_TYPES = {
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/wav",
+    "audio/webm",
+    "audio/ogg",
+    "audio/m4a",
+    "audio/x-m4a",
+    "audio/aac",
+}
+ALLOWED_MIME_TYPES = ALLOWED_IMAGE_MIME_TYPES | ALLOWED_AUDIO_MIME_TYPES
 
 
 @router.post("/upload-url", summary="Request a signed upload URL (Step 1 of 2)")
@@ -69,23 +82,24 @@ async def get_upload_url(
       2. Then call /files/confirm-upload with the `storage_path`.
 
     Validations:
-      - MIME type must be image/jpeg, image/png, or image/webp.
-      - File size must not exceed 5 MB (5,242,880 bytes).
+      - MIME type must be an allowed image or audio format.
+      - File size must not exceed configured limit.
     """
     if payload.mime_type not in ALLOWED_MIME_TYPES:
         return error_response(
             message="Unsupported file type",
             error_code="INVALID_MIME_TYPE",
             status_code=422,
-            details=[{"field": "mime_type", "message_bn": "শুধুমাত্র JPEG, PNG বা WebP ছবি অনুমোদিত।"}],
+            details=[{"field": "mime_type", "message_bn": "শুধুমাত্র অনুমোদিত ছবি (JPEG, PNG, WebP) বা অডিও ফাইল অনুমোদিত।"}],
         )
 
-    if payload.file_size_bytes > MAX_FILE_SIZE_BYTES:
+    max_size = getattr(settings, "max_file_size_bytes", 5 * 1024 * 1024)
+    if payload.file_size_bytes > max_size:
         return error_response(
             message="File too large",
             error_code="FILE_TOO_LARGE",
             status_code=422,
-            details=[{"field": "file_size_bytes", "message_bn": "ছবির আকার সর্বোচ্চ ৫ MB হতে পারবে।"}],
+            details=[{"field": "file_size_bytes", "message_bn": f"ফাইলের আকার সর্বোচ্চ {max_size // (1024 * 1024)} MB হতে পারবে।"}],
         )
 
     upload_url, storage_path = storage_service.generate_upload_url(
@@ -143,12 +157,25 @@ async def confirm_upload(
         )
 
     # Verify file actually exists in storage before saving to DB
-    if not await storage_service.check_file_exists(payload.storage_path):
+    meta = await storage_service.get_file_metadata(payload.storage_path)
+    if not meta:
         return error_response(
             message="Uploaded file not found in storage",
             error_code="FILE_NOT_FOUND_IN_STORAGE",
             status_code=400,
             details=[{"field": "storage_path", "message_bn": "ক্লাউড স্টোরেজে ফাইলটি পাওয়া যায়নি। অনুগ্রহ করে প্রথমে ফাইল আপলোড করুন।"}],
+        )
+
+    # Validate actual file size stored in bucket against maximum limit
+    actual_size = meta.get("content_length", 0)
+    if actual_size > MAX_FILE_SIZE_BYTES:
+        # Delete oversized file from bucket immediately
+        await storage_service.delete_file(payload.storage_path)
+        return error_response(
+            message="Uploaded file size exceeds maximum permitted limit",
+            error_code="FILE_TOO_LARGE",
+            status_code=422,
+            details=[{"field": "file_size_bytes", "message_bn": "স্টোরেজে আপলোডকৃত ফাইলের আকার সর্বোচ্চ ৫ MB সীমার বেশি।"}],
         )
 
     system_file = SystemFile(
@@ -158,7 +185,7 @@ async def confirm_upload(
         bucket_name=settings.storage_bucket_name,
         provider=settings.storage_provider,
         mime_type=payload.mime_type,
-        file_size_bytes=payload.file_size_bytes,
+        file_size_bytes=actual_size if actual_size > 0 else payload.file_size_bytes,
         entity_type=payload.entity_type,
         entity_id=payload.entity_id,
         is_processed=False,
@@ -195,11 +222,17 @@ async def get_view_url(
     if not file:
         return error_response("File not found", "FILE_NOT_FOUND", 404)
 
-    # Access control: only uploader or admin/tech_admin/expert/agent
+    # Access control: uploader or admin/tech_admin; experts/agents may only access diagnosis case files
     user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
     allowed_roles = ("admin", "administrator", "tech_admin", "technical_admin", "expert", "agent")
     if file.uploaded_by != current_user.id and user_role not in allowed_roles:
         return error_response("Access denied", "FORBIDDEN", 403)
+
+    if file.uploaded_by != current_user.id and user_role not in ("admin", "administrator", "tech_admin", "technical_admin"):
+        # Experts and agents are only authorized to view case-related media
+        allowed_entities = ("diagnosis_case", "case_image", "voice_note", "audio_advisory", None)
+        if file.entity_type not in allowed_entities:
+            return error_response("Access denied: Private non-case file", "FORBIDDEN", 403)
 
     view_url = storage_service.generate_view_url(file.storage_path)
 

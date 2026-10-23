@@ -27,6 +27,22 @@ from pydantic import BaseModel, ConfigDict, Field
 # Step 1 — Request Upload URL
 # ─────────────────────────────────────────────────────────
 
+# Supported MIME types: images and audio notes
+AllowedMimeTypes = Literal[
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/wav",
+    "audio/webm",
+    "audio/ogg",
+    "audio/m4a",
+    "audio/x-m4a",
+    "audio/aac",
+]
+
+
 class UploadUrlRequest(BaseModel):
     """
     POST /api/v1/files/upload-url
@@ -34,12 +50,12 @@ class UploadUrlRequest(BaseModel):
     Client sends file metadata BEFORE uploading.
     Backend validates constraints and returns a signed URL.
 
-    Allowed MIME types: image/jpeg, image/png, image/webp
-    Max file size: 5MB (5,242,880 bytes)
+    Allowed MIME types: images (jpeg, png, webp) and voice notes (mp3, wav, ogg, webm, m4a, mp4)
+    Max file size: 5MB
     """
     original_name: str = Field(..., max_length=255, description="Original filename from the device")
-    mime_type: Literal["image/jpeg", "image/png", "image/webp"] = Field(..., description="MIME type of the image")
-    file_size_bytes: int = Field(..., gt=0, le=5_242_880, description="File size in bytes (max 5MB)")
+    mime_type: AllowedMimeTypes = Field(..., description="MIME type of the file")
+    file_size_bytes: int = Field(..., gt=0, le=10_485_760, description="File size in bytes (max 10MB)")
     entity_type: Optional[str] = Field(None, max_length=50, description="Entity this file belongs to (e.g., 'diagnosis_case')")
     entity_id: Optional[UUID] = None
 
@@ -64,8 +80,8 @@ class ConfirmUploadRequest(BaseModel):
     """
     storage_path: str = Field(..., description="Path returned from /upload-url step")
     original_name: str = Field(..., max_length=255)
-    mime_type: Literal["image/jpeg", "image/png", "image/webp"] = Field(..., description="Allowed image MIME types")
-    file_size_bytes: int = Field(..., gt=0, le=5_242_880, description="File size in bytes (max 5MB)")
+    mime_type: AllowedMimeTypes = Field(..., description="Allowed image or audio MIME types")
+    file_size_bytes: int = Field(..., gt=0, le=10_485_760, description="File size in bytes (max 10MB)")
     entity_type: Optional[str] = Field(None, max_length=50)
     entity_id: Optional[UUID] = None
 

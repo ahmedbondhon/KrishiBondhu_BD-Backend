@@ -20,8 +20,27 @@ class CreatePlotRequest(BaseModel):
     """POST /api/v1/farms — Create a new farm plot."""
     name: str = Field(..., min_length=1, max_length=100, description="Plot name (e.g., 'উত্তর মাঠ')")
     farmer_id: Optional[UUID] = Field(None, description="Target farmer ID if created on behalf by agent or admin")
-    area_bigha: Optional[Decimal] = Field(None, ge=0, description="Area in traditional bigha unit")
-    area_sqm: Optional[Decimal] = Field(None, ge=0, description="Area in square meters")
+    area_bigha: Optional[Decimal] = Field(None, gt=0, description="Area in traditional bigha unit")
+    area_sqm: Optional[Decimal] = Field(None, gt=0, description="Area in square meters")
+    soil_type: Optional[str] = Field(None, max_length=50)
+    irrigation_source: Optional[str] = Field(None, max_length=50)
+    division_id: Optional[UUID] = None
+    district_id: Optional[UUID] = None
+    upazila_id: Optional[UUID] = None
+    union_id: Optional[UUID] = None
+
+    @model_validator(mode="after")
+    def validate_plot_area(self):
+        if self.area_bigha is None and self.area_sqm is None:
+            raise ValueError("জমির আয়তন (area_bigha অথবা area_sqm) উল্লেখ করা আবশ্যক এবং তা ০ এর বেশি হতে হবে।")
+        return self
+
+
+class UpdatePlotRequest(BaseModel):
+    """PATCH/PUT /api/v1/farms/{plot_id} — Update farm plot details."""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    area_bigha: Optional[Decimal] = Field(None, gt=0)
+    area_sqm: Optional[Decimal] = Field(None, gt=0)
     soil_type: Optional[str] = Field(None, max_length=50)
     irrigation_source: Optional[str] = Field(None, max_length=50)
     division_id: Optional[UUID] = None
@@ -69,6 +88,16 @@ class CreatePlotCropRequest(BaseModel):
         return self
 
 
+class UpdatePlotCropRequest(BaseModel):
+    """PATCH /api/v1/farms/{plot_id}/crop-cycles/{cycle_id} — Update crop cycle status and yield."""
+    current_stage_id: Optional[UUID] = Field(None, description="Current growth stage ID")
+    expected_harvest_date: Optional[date] = None
+    actual_harvest_date: Optional[date] = None
+    status: Optional[str] = Field(None, description="planned | active | harvested | failed")
+    yield_kg: Optional[Decimal] = Field(None, ge=0, description="Actual yield in kilograms")
+    notes: Optional[str] = None
+
+
 class PlotCropResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -79,5 +108,7 @@ class PlotCropResponse(BaseModel):
     current_stage_id: Optional[UUID] = None
     sowing_date: Optional[date] = None
     expected_harvest_date: Optional[date] = None
+    actual_harvest_date: Optional[date] = None
     status: str
+    yield_kg: Optional[Decimal] = None
     notes: Optional[str] = None

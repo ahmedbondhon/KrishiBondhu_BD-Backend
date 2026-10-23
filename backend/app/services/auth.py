@@ -38,6 +38,7 @@ from app.core.security import (
     verify_password,
 )
 from app.models.auth import User
+from app.models.diagnosis import ExpertProfile
 from app.models.geo import District, Union, Upazila
 from app.repositories.auth import AuthRepository
 from app.schemas.auth import (
@@ -83,7 +84,10 @@ class AuthService:
         payload.phone_number = phone
 
         # 1. Duplicate check
-        if await supabase_client.get_user_by_phone(phone) or await self.repo.phone_exists(phone):
+        existing_user = await self.repo.get_user_by_phone_any_state(phone)
+        if existing_user and not existing_user.is_deleted:
+            raise DuplicateUserError("phone_number")
+        if not existing_user and await supabase_client.get_user_by_phone(phone):
             raise DuplicateUserError("phone_number")
         if payload.email and (await supabase_client.get_user_by_email(payload.email) or await self.repo.email_exists(payload.email)):
             raise DuplicateUserError("email")
@@ -110,25 +114,47 @@ class AuthService:
             getattr(payload, "union_id", None),
         )
 
-        # 4. Create Local User
-        user = await self.repo.create_user(User(
-            full_name=payload.full_name,
-            phone_number=phone,
-            password_hash=hash_password(payload.password),
-            email=payload.email,
-            role_id=role.id,
-            division_id=div_id,
-            district_id=dist_id,
-            upazila_id=upa_id,
-            union_id=uni_id,
-            village=getattr(payload, "village", None),
-            preferred_language=payload.preferred_language,
-            preferred_communication=getattr(payload, "preferred_communication", "sms") or "sms",
-            avatar_url=getattr(payload, "avatar_url", None),
-            status=status,
-            is_active=is_active,
-            phone_verified=True,
-        ))
+        # 4. Create or Reactivate Local User
+        if existing_user and existing_user.is_deleted:
+            existing_user.is_deleted = False
+            existing_user.deleted_at = None
+            existing_user.is_active = is_active
+            existing_user.status = status
+            existing_user.full_name = payload.full_name
+            existing_user.password_hash = hash_password(payload.password)
+            existing_user.email = payload.email
+            existing_user.role_id = role.id
+            existing_user.division_id = div_id
+            existing_user.district_id = dist_id
+            existing_user.upazila_id = upa_id
+            existing_user.union_id = uni_id
+            existing_user.village = getattr(payload, "village", None)
+            existing_user.preferred_language = payload.preferred_language
+            existing_user.preferred_communication = getattr(payload, "preferred_communication", "sms") or "sms"
+            existing_user.avatar_url = getattr(payload, "avatar_url", None)
+            existing_user.phone_verified = True
+            existing_user.updated_at = datetime.now(timezone.utc)
+            user = existing_user
+            await self.db.flush()
+        else:
+            user = await self.repo.create_user(User(
+                full_name=payload.full_name,
+                phone_number=phone,
+                password_hash=hash_password(payload.password),
+                email=payload.email,
+                role_id=role.id,
+                division_id=div_id,
+                district_id=dist_id,
+                upazila_id=upa_id,
+                union_id=uni_id,
+                village=getattr(payload, "village", None),
+                preferred_language=payload.preferred_language,
+                preferred_communication=getattr(payload, "preferred_communication", "sms") or "sms",
+                avatar_url=getattr(payload, "avatar_url", None),
+                status=status,
+                is_active=is_active,
+                phone_verified=True,
+            ))
 
         # 5. Record Consents & Sync to Supabase
         loc_granted = bool(payload.location_permission_granted)
@@ -173,6 +199,20 @@ class AuthService:
         self, payload: ExpertRegisterRequest, ip_address: str | None = None, user_agent: str | None = None
     ) -> tuple[User, None]:
         user = await self._register_user(payload, "expert", "pending_approval", False, ip_address, user_agent)
+        # Create corresponding ExpertProfile record in case_mgmt.expert_profiles
+        try:
+            expert_profile = ExpertProfile(
+                user_id=user.id,
+                designation=payload.credentials or "Agricultural Expert",
+                organization="Department of Agricultural Extension (DAE)",
+                specialization_notes=payload.specialization,
+                is_available=True,
+                max_active_cases=10,
+            )
+            self.db.add(expert_profile)
+            await self.db.flush()
+        except Exception as e:
+            logger.warning(f"Failed to auto-create ExpertProfile on register: {e}")
         return user, None
 
     async def create_admin_user(self, payload: AdminCreateUserRequest, created_by: User) -> tuple[User, str]:
@@ -228,6 +268,26 @@ class AuthService:
             ip_address=ip,
         )
         await supabase_client.update_user_status(str(user_id), new_status)
+
+        # If user is an approved expert, ensure ExpertProfile exists and is available
+        if is_active and user.role_code == "expert":
+            from sqlalchemy import select
+            existing_profile = (await self.db.execute(
+                select(ExpertProfile).where(ExpertProfile.user_id == user_id)
+            )).scalar_one_or_none()
+            if not existing_profile:
+                profile = ExpertProfile(
+                    user_id=user_id,
+                    designation="Agricultural Expert",
+                    organization="Department of Agricultural Extension (DAE)",
+                    is_available=True,
+                    max_active_cases=10,
+                )
+                self.db.add(profile)
+            else:
+                existing_profile.is_available = True
+            await self.db.flush()
+
         return updated or user
 
     async def approve_user(self, user_id: uuid.UUID, admin_user: User, ip_address: str | None = None) -> User:

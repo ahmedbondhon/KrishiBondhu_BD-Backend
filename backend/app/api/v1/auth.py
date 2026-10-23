@@ -19,7 +19,7 @@ HTTP ↔ service layer.
 """
 
 import uuid
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -27,15 +27,24 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.dependencies import get_current_user, get_db
+from app.core.dependencies import get_current_user, get_db, require_roles
 from app.core.responses import success_response
 from app.core.security import decode_token
 from app.models.auth import User
 from app.schemas.auth import (
+    AdminCreateUserRequest,
+    ExpertRegisterRequest,
+    FarmerAgentRegisterRequest,
+    ForgotPasswordRequest,
     LoginRequest,
+    LogoutRequest,
+    OtpLoginRequest,
+    OtpLoginVerifyRequest,
     RefreshTokenRequest,
     RegisterRequest,
+    ResetPasswordRequest,
     TokenResponse,
+    UpdateLanguageRequest,
     UpdateProfileRequest,
     UserResponse,
 )
@@ -53,7 +62,16 @@ async def register(
     """
     Register a new farmer, agent, or expert account.
     Supports both standard registration and multi-step verification registration.
+    Enforces per-IP rate limiting to prevent automated mass-registration.
     """
+    from app.services.otp_service import ip_rate_limiter
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    if not ip_rate_limiter.check_and_record(f"register_ip_{client_ip}", max_count=15, window_minutes=10):
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "RATE_LIMIT_EXCEEDED", "message_bn": "খুব বেশি রেজিস্ট্রেশন প্রচেষ্টা হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।"},
+        )
+
     body = await request.json()
     from app.services.auth import AuthService as ExtendedAuthService, _user_to_response
     if "verification_token" in body or "terms_accepted" in body:
@@ -107,7 +125,18 @@ async def login(
     """
     Authenticate with phone number and password.
     Returns access token and refresh token.
+    Enforces per-IP rate limiting to prevent brute force on unlisted/unregistered numbers.
     """
+    from app.services.otp_service import ip_rate_limiter
+
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    # Allow at most 20 login attempts per IP per 10 minutes to stop credential stuffing / brute force
+    if not ip_rate_limiter.check_and_record(f"login_ip_{client_ip}", max_count=20, window_minutes=10):
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "RATE_LIMIT_EXCEEDED", "message_bn": "খুব বেশি ব্যর্থ প্রচেষ্টা হয়েছে। ১০ মিনিট পর আবার চেষ্টা করুন।"},
+        )
+
     from unittest.mock import AsyncMock
     from app.services.auth import AuthService as ExtendedAuthService, supabase_client
 
@@ -345,5 +374,105 @@ async def verify_otp_login(
         ip_address=ip_address,
         user_agent=ua,
     )
+
+
+# =========================================================================
+# Logout & Multi-Device Session Management
+# =========================================================================
+
+@router.post("/logout", summary="লগআউট: বর্তমান সেশনের রিফ্রেশ টোকেন বাতিল করুন")
+async def logout(
+    payload: LogoutRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Revoke refresh token and invalidate the active session."""
+    from app.services.auth import AuthService as ExtendedAuthService
+    service = ExtendedAuthService(db)
+    await service.logout(payload.refresh_token)
+    return {"message": "সফলভাবে লগআউট হয়েছে।"}
+
+
+@router.post("/logout-all", summary="সব ডিভাইস থেকে লগআউট করুন")
+async def logout_all(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Revoke all active refresh tokens for current user."""
+    from app.services.auth import AuthService as ExtendedAuthService
+    service = ExtendedAuthService(db)
+    await service.logout_all(current_user.id)
+    return {"message": "সকল ডিভাইস থেকে সফলভাবে লগআউট সম্পন্ন হয়েছে।"}
+
+
+# =========================================================================
+# Expert Registration & Admin User Onboarding Routes
+# =========================================================================
+
+@router.post("/register/expert", status_code=201, summary="কৃষি বিশেষজ্ঞ হিসেবে রেজিস্ট্রেশন (Admin Approval Required)")
+async def register_expert(
+    payload: ExpertRegisterRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.auth import AuthService as ExtendedAuthService
+    service = ExtendedAuthService(db)
+    ip_address = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+    user, _ = await service.register_expert(payload, ip_address=ip_address, user_agent=ua)
+    return {
+        "message": "বিশেষজ্ঞ হিসেবে আপনার আবেদন গৃহীত হয়েছে। অ্যাডমিন অনুমোদনের পর আপনি লগইন করতে পারবেন।",
+        "user_id": str(user.id),
+        "status": user.status,
+    }
+
+
+@router.post("/register/farmer-agent", status_code=201, summary="কৃষক / তথ্যমিত্র রেজিস্ট্রেশন (Multi-step)")
+async def register_farmer_agent(
+    payload: FarmerAgentRegisterRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.auth import AuthService as ExtendedAuthService
+    service = ExtendedAuthService(db)
+    ip_address = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+    user, tokens = await service.register_farmer_agent(payload, ip_address=ip_address, user_agent=ua)
+    return {
+        "message": "রেজিস্ট্রেশন সফল হয়েছে।",
+        "user": UserResponse.model_validate(user).model_dump(),
+        "tokens": tokens.model_dump() if hasattr(tokens, "model_dump") else tokens,
+    }
+
+
+@router.post("/users/admin", status_code=201, summary="অ্যাডমিন দ্বারা নতুন প্রশাসক তৈরি (Admin Only)", dependencies=[Depends(require_roles("administrator", "admin"))])
+async def create_admin_user(
+    payload: AdminCreateUserRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.auth import AuthService as ExtendedAuthService
+    service = ExtendedAuthService(db)
+    user, role_code = await service.create_admin_user(payload, created_by=current_user)
+    return {
+        "message": f"{role_code} একাউন্ট সফলভাবে তৈরি হয়েছে।",
+        "user_id": str(user.id),
+        "role": role_code,
+    }
+
+
+@router.patch("/language", summary="ব্যবহারকারীর পছন্দের ভাষা পরিবর্তন করুন")
+async def update_language(
+    payload: UpdateLanguageRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.auth import AuthService as ExtendedAuthService
+    service = ExtendedAuthService(db)
+    user = await service.update_language(current_user.id, payload.preferred_language)
+    return {
+        "message": "পছন্দের ভাষা সফলভাবে আপডেট হয়েছে।",
+        "preferred_language": user.preferred_language if user else payload.preferred_language,
+    }
+
 
 

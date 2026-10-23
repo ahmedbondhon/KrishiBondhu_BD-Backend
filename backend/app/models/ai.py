@@ -35,7 +35,7 @@ class AIModel(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     Only the model where `is_active=True` is used for new predictions.
     Old model records are preserved for historical prediction auditing.
 
-    Seeded with: 'krishibondhu-crop-vision' v1.0.0
+    Seeded with: 'chashiguard-cv-v1' v1.0.0
     """
     __tablename__ = "models"
     __table_args__ = (

@@ -55,6 +55,17 @@ async def list_crops(
     )
 
 
+async def _ensure_crop_exists(crop_id: UUID, db: AsyncSession) -> Crop:
+    result = await db.execute(select(Crop).where(Crop.id == crop_id, Crop.is_active == True))
+    crop = result.scalar_one_or_none()
+    if not crop:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "CROP_NOT_FOUND", "message_bn": "ফসলের তথ্য পাওয়া যায়নি।"},
+        )
+    return crop
+
+
 @router.get("/crops/{crop_id}", summary="Get crop details with varieties and growth stages")
 async def get_crop_details(
     crop_id: UUID,
@@ -64,7 +75,7 @@ async def get_crop_details(
     result = await db.execute(
         select(Crop)
         .options(
-            selectinload(Crop.varieties),
+            selectinload(Crop.varieties.and_(CropVariety.is_active == True)),
             selectinload(Crop.growth_stages),
         )
         .where(Crop.id == crop_id, Crop.is_active == True)
@@ -121,6 +132,7 @@ async def list_crop_varieties(
     db: AsyncSession = Depends(get_db),
 ):
     """Returns all active varieties for a specific crop."""
+    await _ensure_crop_exists(crop_id, db)
     result = await db.execute(
         select(CropVariety)
         .where(CropVariety.crop_id == crop_id, CropVariety.is_active == True)
@@ -150,6 +162,7 @@ async def list_growth_stages(
     db: AsyncSession = Depends(get_db),
 ):
     """Returns growth stages for a specific crop in sequential order."""
+    await _ensure_crop_exists(crop_id, db)
     result = await db.execute(
         select(GrowthStage)
         .where(GrowthStage.crop_id == crop_id)
@@ -181,6 +194,7 @@ async def list_crop_issues(
     db: AsyncSession = Depends(get_db),
 ):
     """Returns issues (diseases, pests, nutrient deficiencies) cataloged for a specific crop."""
+    await _ensure_crop_exists(crop_id, db)
     query = select(Issue).where(Issue.crop_id == crop_id, Issue.is_active == True)
     if category:
         query = query.where(Issue.category == category)

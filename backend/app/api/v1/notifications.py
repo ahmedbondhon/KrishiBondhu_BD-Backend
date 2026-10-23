@@ -135,7 +135,7 @@ async def mark_all_read(
 ):
     """Mark all of the current user's unread notifications as read at once."""
     now = datetime.now(timezone.utc)
-    await db.execute(
+    result = await db.execute(
         update(Notification)
         .where(
             Notification.user_id == current_user.id,
@@ -146,6 +146,10 @@ async def mark_all_read(
     await db.flush()
 
     return success_response(
-        data={"marked_read": True, "read_at": now.isoformat()},
+        data={
+            "marked_read": True,
+            "updated_count": result.rowcount,
+            "read_at": now.isoformat(),
+        },
         message="সব বিজ্ঞপ্তি পঠিত হিসেবে চিহ্নিত হয়েছে।",
     )

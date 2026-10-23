@@ -17,7 +17,7 @@ Usage:
 from functools import lru_cache
 from typing import List, Optional
 
-from pydantic import field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,7 +55,8 @@ class Settings(BaseSettings):
     storage_bucket_name: str = "krishibondhu-uploads"
     storage_signed_url_expiry_seconds: int = 3600
     upload_dir: str = "uploads"
-    max_file_size_bytes: int = 2 * 1024 * 1024
+    max_file_size_bytes: int = 5 * 1024 * 1024      # 5 MB for diagnosis/general files
+    max_avatar_size_bytes: int = 2 * 1024 * 1024    # 2 MB for profile pictures
     public_base_url: str = "http://localhost:8000"
 
     enable_supabase_auth_fallback: bool = True
@@ -106,7 +107,10 @@ class Settings(BaseSettings):
     ai_confidence_threshold: float = 0.65  # Below this -> escalate to human expert
 
     # --- CORS ---
-    cors_origins: List[str] = ["http://localhost:3000", "http://localhost:5173"]
+    cors_origins: List[str] = Field(
+        default=["http://localhost:3000", "http://localhost:5173"],
+        validation_alias="CORS_ALLOWED_ORIGINS",
+    )
 
     # --- Timezone ---
     timezone: str = "Asia/Dhaka"
@@ -114,11 +118,30 @@ class Settings(BaseSettings):
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, v):
-        """Allow CORS origins as a JSON list string or an actual list."""
+        """Allow CORS origins as a JSON list, comma-separated string, or Python list."""
         if isinstance(v, str):
-            import json
-            return json.loads(v)
+            v_str = v.strip()
+            if v_str.startswith("[") and v_str.endswith("]"):
+                import json
+                try:
+                    return json.loads(v_str)
+                except Exception:
+                    pass
+            # Split comma-separated string
+            return [origin.strip() for origin in v_str.split(",") if origin.strip()]
         return v
+
+    @model_validator(mode="after")
+    def validate_production_security(self):
+        env = (self.environment or self.app_env or "development").lower()
+        if env in ("production", "prod"):
+            if self.jwt_secret_key in ("change-me-in-production", "secret", "default", ""):
+                raise ValueError("CRITICAL SECURITY RISK: jwt_secret_key must be explicitly set and secure in production.")
+            if self.debug:
+                raise ValueError("CRITICAL SECURITY RISK: debug mode must be False in production.")
+            if self.otp_demo_mode:
+                raise ValueError("CRITICAL SECURITY RISK: otp_demo_mode must be False in production.")
+        return self
 
 
 @lru_cache()

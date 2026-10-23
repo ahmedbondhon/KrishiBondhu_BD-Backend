@@ -85,6 +85,12 @@ class AuthRepository:
         result = await self.db.execute(stmt)
         return await self._extract_entity(result, User)
 
+    async def get_user_by_phone_any_state(self, phone_number: str) -> Optional[User]:
+        phone_number = normalize_bd_phone(phone_number)
+        stmt = select(User).options(selectinload(User.role)).where(User.phone_number == phone_number)
+        result = await self.db.execute(stmt)
+        return await self._extract_entity(result, User)
+
     async def get_user_by_email(self, email: str) -> Optional[User]:
         stmt = select(User).options(selectinload(User.role)).where(User.email == email, User.is_deleted == False)
         result = await self.db.execute(stmt)

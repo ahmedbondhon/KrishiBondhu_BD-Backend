@@ -37,5 +37,13 @@ GRANT USAGE ON SCHEMA case_mgmt TO postgres, anon, authenticated, service_role;
 GRANT USAGE ON SCHEMA climate TO postgres, anon, authenticated, service_role;
 GRANT USAGE ON SCHEMA market TO postgres, anon, authenticated, service_role;
 
--- Set default search path
-ALTER DATABASE postgres SET search_path TO public, auth, geo, catalog, farm, system, ai, advisory, case_mgmt, climate, market;
+-- Set default search path dynamically for current database and session
+DO $$
+BEGIN
+    EXECUTE format('ALTER DATABASE %I SET search_path TO public, auth, geo, catalog, farm, system, ai, advisory, case_mgmt, climate, market', current_database());
+EXCEPTION WHEN OTHERS THEN
+    -- Fallback for managed environments where ALTER DATABASE is restricted
+    NULL;
+END
+$$;
+SET search_path TO public, auth, geo, catalog, farm, system, ai, advisory, case_mgmt, climate, market;

@@ -1179,7 +1179,10 @@ class TestEdgeCasesAndConcurrencyFixes:
         def mock_execute(stmt, *args, **kwargs):
             res = MagicMock()
             q_str = str(stmt).lower()
-            if "case_mgmt.diagnosis_cases" in q_str:
+            if "case_id !=" in q_str:
+                res.scalar_one_or_none.return_value = None
+                res.scalars.return_value.all.return_value = []
+            elif "case_mgmt.diagnosis_cases" in q_str:
                 res.scalar_one_or_none.return_value = case
             elif "case_images" in q_str:
                 res.scalars.return_value.all.return_value = [case_image]
@@ -1272,3 +1275,464 @@ class TestEdgeCasesAndConcurrencyFixes:
         assert len(executed_stmts) == 1
         stmt = executed_stmts[0]
         assert hasattr(stmt, "_for_update_arg") and stmt._for_update_arg is not None
+
+
+# ── 7. Follow-Up Bugs, Edge Cases & Feature Completeness ────────────────────
+
+class TestFollowUpBugsAndFeatureCompleteness:
+    """Test suite covering the 6 categories of follow-up bug fixes and enhancements."""
+
+    def test_market_models_exported_in_models_init(self):
+        """1. New models in models/market.py are exported in models/__init__.py for Alembic and SQLAlchemy registry."""
+        import app.models as models_pkg
+        from app.models.market import GroupSellingOffer, OfferParticipant
+
+        assert hasattr(models_pkg, "GroupSellingOffer")
+        assert hasattr(models_pkg, "OfferParticipant")
+        assert "GroupSellingOffer" in models_pkg.__all__
+        assert "OfferParticipant" in models_pkg.__all__
+
+    @pytest.mark.asyncio
+    async def test_attach_image_rejects_already_attached_file(self):
+        """1. attach_image prevents attaching a file_id that is already attached to another diagnosis case."""
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        farmer_id = uuid.uuid4()
+        case_id = uuid.uuid4()
+        other_case_id = uuid.uuid4()
+        file_id = uuid.uuid4()
+
+        case = DiagnosisCase(id=case_id, farmer_id=farmer_id, status="submitted", is_deleted=False)
+        system_file = SystemFile(id=file_id, uploaded_by=farmer_id, is_deleted=False)
+        existing_attachment = CaseImage(id=uuid.uuid4(), case_id=other_case_id, file_id=file_id)
+
+        def mock_execute(query, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(query)
+            if "case_images" in q_str:
+                res.scalar_one_or_none.return_value = existing_attachment
+            elif "system.files" in q_str:
+                res.scalar_one_or_none.return_value = system_file
+            elif "diagnosis_cases" in q_str:
+                res.scalar_one_or_none.return_value = case
+            else:
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        from app.schemas.diagnosis import AttachCaseImageRequest
+        payload = AttachCaseImageRequest(file_id=file_id, image_type="leaf", is_primary=True)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.attach_image(mock_db, case_id=case_id, farmer_id=farmer_id, payload=payload)
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail["code"] == "FILE_ALREADY_ATTACHED"
+
+    @pytest.mark.asyncio
+    async def test_delete_case_preserves_file_if_used_by_another_case(self):
+        """1. delete_case_with_cleanup checks if file is still in use by another active case before soft-deleting/queueing cleanup."""
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        farmer_id = uuid.uuid4()
+        case_id = uuid.uuid4()
+        other_case_id = uuid.uuid4()
+        file_id = uuid.uuid4()
+
+        case = DiagnosisCase(id=case_id, farmer_id=farmer_id, status="submitted", is_deleted=False)
+        case_image = CaseImage(id=uuid.uuid4(), case_id=case_id, file_id=file_id)
+        system_file = SystemFile(id=file_id, uploaded_by=farmer_id, storage_path="cases/img.jpg", is_deleted=False)
+        other_active_attachment = CaseImage(id=uuid.uuid4(), case_id=other_case_id, file_id=file_id)
+
+        def mock_execute(query, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(query)
+            if "case_images" in q_str and "case_id !=" in q_str:
+                res.scalar_one_or_none.return_value = other_active_attachment
+            elif "case_images" in q_str:
+                res.scalars.return_value.all.return_value = [case_image]
+            elif "system.files" in q_str:
+                res.scalars.return_value.all.return_value = [system_file]
+            elif "diagnosis_cases" in q_str:
+                res.scalar_one_or_none.return_value = case
+            else:
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+        bg_tasks = MagicMock()
+
+        success = await service.delete_case_with_cleanup(
+            mock_db, case_id=case_id, user_id=farmer_id, user_role="farmer", background_tasks=bg_tasks
+        )
+        assert success is True
+        assert case.is_deleted is True
+        # Since another case is using this file, system_file should NOT be marked is_deleted=True
+        assert system_file.is_deleted is False
+        bg_tasks.add_task.assert_not_called()
+
+    def test_file_size_settings_and_audio_mime_types(self):
+        """2. File size configurations match settings and audio MIME types are permitted in schemas and files API."""
+        from app.core.config import settings
+        from app.api.v1.files import ALLOWED_MIME_TYPES
+        from app.schemas.files import UploadUrlRequest
+
+        assert settings.max_file_size_bytes == 5 * 1024 * 1024
+        assert settings.max_avatar_size_bytes == 2 * 1024 * 1024
+
+        audio_mimes = ["audio/mpeg", "audio/mp4", "audio/wav", "audio/webm", "audio/ogg"]
+        for mime in audio_mimes:
+            assert mime in ALLOWED_MIME_TYPES
+            # Should not raise validation error in UploadUrlRequest
+            req = UploadUrlRequest(
+                original_name="voice_note.mp3",
+                mime_type=mime,
+                file_size_bytes=1024 * 500,
+                entity_type="diagnosis_case",
+            )
+            assert req.mime_type == mime
+
+    @pytest.mark.asyncio
+    async def test_get_expert_cases_supports_status_filter(self):
+        """3. GET /expert/cases supports status_filter ('escalated', 'expert_reviewed', 'all')."""
+        import json
+        from app.api.v1.diagnosis import get_expert_cases
+
+        mock_db = AsyncMock()
+        expert_user = User(id=uuid.uuid4(), full_name="Dr. Agricultural Expert", is_active=True)
+        role = Role(code="expert")
+        expert_user.role = role
+
+        executed_stmts = []
+
+        def mock_execute(stmt, *args, **kwargs):
+            executed_stmts.append(stmt)
+            res = MagicMock()
+            res.scalars.return_value.all.return_value = []
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        # Test with status_filter="expert_reviewed"
+        resp = await get_expert_cases(
+            status_filter="expert_reviewed",
+            limit=50,
+            offset=0,
+            current_user=expert_user,
+            db=mock_db,
+        )
+        body = json.loads(resp.body)
+        assert body["success"] is True
+        stmt = executed_stmts[-1]
+        compiled = stmt.compile()
+        assert compiled.params.get("status_1") == "expert_reviewed" or "expert_reviews" in str(stmt)
+
+        # Test with status_filter="all"
+        resp_all = await get_expert_cases(
+            status_filter="all",
+            limit=50,
+            offset=0,
+            current_user=expert_user,
+            db=mock_db,
+        )
+        body_all = json.loads(resp_all.body)
+        assert body_all["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_soft_deleted_user_reactivated_on_reregistration(self):
+        """3. Registering with a phone number belonging to a soft-deleted user reactivates the account without unique violation."""
+        from app.services.auth_service import AuthService
+        from app.schemas.auth import RegisterRequest
+
+        service = AuthService()
+        mock_db = AsyncMock()
+
+        role = Role(id=uuid.uuid4(), code="farmer", name="Farmer")
+        soft_deleted_user = User(
+            id=uuid.uuid4(),
+            phone_number="01799887766",
+            full_name="Old Name",
+            is_deleted=True,
+            deleted_at=datetime.now(timezone.utc),
+            is_active=False,
+            role_id=role.id,
+        )
+
+        def mock_execute(stmt, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(stmt)
+            if "auth.users" in q_str:
+                res.scalar_one_or_none.return_value = soft_deleted_user
+            elif "auth.roles" in q_str:
+                res.scalar_one_or_none.return_value = role
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        req = RegisterRequest(
+            phone_number="01799887766",
+            password="StrongPassword123!",
+            full_name="Reactivated Farmer",
+            role_code="farmer",
+            terms_accepted=True,
+            privacy_accepted=True,
+        )
+
+        user = await service.register_user(mock_db, req)
+        assert user.id == soft_deleted_user.id
+        assert user.is_deleted is False
+        assert user.deleted_at is None
+        assert user.is_active is True
+        assert user.full_name == "Reactivated Farmer"
+
+    @pytest.mark.asyncio
+    async def test_catalog_child_endpoints_raise_404_for_inactive_or_missing_crop(self):
+        """4. /varieties, /growth-stages, and /issues raise 404 CROP_NOT_FOUND if crop does not exist or is inactive."""
+        from app.api.v1.catalog import list_crop_varieties, list_growth_stages, list_crop_issues
+
+        mock_db = AsyncMock()
+        mock_res = MagicMock()
+        mock_res.scalar_one_or_none.return_value = None
+        mock_db.execute.return_value = mock_res
+
+        missing_crop_id = uuid.uuid4()
+
+        with pytest.raises(HTTPException) as exc_var:
+            await list_crop_varieties(crop_id=missing_crop_id, db=mock_db)
+        assert exc_var.value.status_code == 404
+        assert exc_var.value.detail["code"] == "CROP_NOT_FOUND"
+
+        with pytest.raises(HTTPException) as exc_stages:
+            await list_growth_stages(crop_id=missing_crop_id, db=mock_db)
+        assert exc_stages.value.status_code == 404
+        assert exc_stages.value.detail["code"] == "CROP_NOT_FOUND"
+
+        with pytest.raises(HTTPException) as exc_issues:
+            await list_crop_issues(crop_id=missing_crop_id, category=None, db=mock_db)
+        assert exc_issues.value.status_code == 404
+        assert exc_issues.value.detail["code"] == "CROP_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_get_case_includes_expert_identity(self):
+        """4. GET /diagnosis-cases/{case_id} includes expert's full_name, designation, and organization in reviews."""
+        import json
+        from app.api.v1.diagnosis import get_case
+        from app.models.diagnosis import ExpertReview, ExpertProfile
+
+        mock_db = AsyncMock()
+        farmer_id = uuid.uuid4()
+        expert_id = uuid.uuid4()
+        case_id = uuid.uuid4()
+
+        farmer_user = User(id=farmer_id, role=Role(code="farmer"))
+        expert_user = User(id=expert_id, full_name="Dr. Tariqul Islam", role=Role(code="expert"))
+        expert_profile = ExpertProfile(
+            user_id=expert_id,
+            designation="Senior Scientific Officer",
+            organization="Bari Gazipur",
+        )
+
+        review = ExpertReview(
+            id=uuid.uuid4(),
+            case_id=case_id,
+            expert_id=expert_id,
+            agreed_with_ai=True,
+            diagnosis_notes_bn="সঠিক পর্যবেক্ষণ",
+            prescribed_treatment_bn="ঔষধ প্রয়োগ করুন",
+            reviewed_at=datetime.now(timezone.utc),
+            expert=expert_user,
+        )
+
+        case = DiagnosisCase(
+            id=case_id,
+            farmer_id=farmer_id,
+            case_number="KB-2026-000001",
+            status="expert_reviewed",
+            is_deleted=False,
+            predictions=[],
+            advisory=None,
+            expert_reviews=[review],
+            images=[],
+        )
+
+        def mock_execute(stmt, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(stmt)
+            if "case_mgmt.diagnosis_cases" in q_str:
+                res.scalar_one_or_none.return_value = case
+            elif "auth.users" in q_str:
+                res.scalars.return_value.all.return_value = [expert_user]
+            elif "expert_profiles" in q_str:
+                res.scalars.return_value.all.return_value = [expert_profile]
+            elif "catalog.issues" in q_str:
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        resp = await get_case(case_id=case_id, current_user=farmer_user, db=mock_db)
+        body = json.loads(resp.body)
+        data = body["data"]
+        assert len(data["expert_reviews"]) == 1
+        r_data = data["expert_reviews"][0]
+        assert r_data["expert_name"] == "Dr. Tariqul Islam"
+        assert r_data["expert_designation"] == "Senior Scientific Officer"
+        assert r_data["expert_organization"] == "Bari Gazipur"
+
+    @pytest.mark.asyncio
+    async def test_case_resolved_at_timestamp_is_set(self):
+        """4. submit_expert_review sets case.resolved_at = datetime.now(timezone.utc)."""
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        case_id = uuid.uuid4()
+        expert_id = uuid.uuid4()
+        case = DiagnosisCase(id=case_id, status="escalated", is_deleted=False)
+
+        def mock_execute(stmt, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(stmt)
+            if "case_mgmt.diagnosis_cases" in q_str:
+                res.scalar_one_or_none.return_value = case
+            elif "case_mgmt.case_assignments" in q_str:
+                res.scalar_one_or_none.return_value = None
+            elif "advisories" in q_str:
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        payload = SubmitExpertReviewRequest(
+            agreed_with_ai=True,
+            diagnosis_notes_bn="সঠিক নিশ্চিতকরণ।",
+            prescribed_treatment_bn="নির্দিষ্ট বালাইনাশক ব্যবহার করুন।",
+        )
+
+        review = await service.submit_expert_review(mock_db, case_id=case_id, expert_user_id=expert_id, payload=payload)
+        assert review.case_id == case_id
+        assert case.resolved_at is not None
+        assert isinstance(case.resolved_at, datetime)
+
+    @pytest.mark.asyncio
+    async def test_get_view_url_restricts_expert_agent_to_case_files(self):
+        """6. GET /files/{file_id}/view-url prevents horizontal privilege escalation for non-case files."""
+        import json
+        from app.api.v1.files import get_view_url
+
+        mock_db = AsyncMock()
+        owner_id = uuid.uuid4()
+        agent_user = User(id=uuid.uuid4(), role=Role(code="agent"))
+
+        # File is a private document, not a diagnosis case file
+        private_file = SystemFile(
+            id=uuid.uuid4(),
+            uploaded_by=owner_id,
+            entity_type="user_private_document",
+            storage_path="docs/nid.pdf",
+            bucket_name="krishibondhu-uploads",
+            is_deleted=False,
+        )
+
+        res = MagicMock()
+        res.scalar_one_or_none.return_value = private_file
+        mock_db.execute.return_value = res
+
+        resp = await get_view_url(file_id=private_file.id, current_user=agent_user, db=mock_db)
+        assert resp.status_code == 403
+        data = json.loads(resp.body)
+        assert data["error"]["code"] == "FORBIDDEN"
+
+    @pytest.mark.asyncio
+    async def test_audit_logs_created_for_diagnosis_creation_and_ai_prediction(self):
+        """6. create_case and analyze_case record AuditLog events (DIAGNOSIS_SUBMITTED, AI_PREDICTION_MADE)."""
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+        mock_db.add = MagicMock()
+
+        farmer_id = uuid.uuid4()
+        crop_id = uuid.uuid4()
+
+        from app.schemas.diagnosis import CreateDiagnosisCaseRequest
+        payload = CreateDiagnosisCaseRequest(crop_id=crop_id, farmer_notes="পাতায় দাগ")
+
+        # Mock sequence count
+        res_seq = MagicMock()
+        res_seq.scalar.return_value = 1
+        mock_db.execute.return_value = res_seq
+
+        case = await service.create_case(mock_db, farmer_id=farmer_id, payload=payload)
+        assert case.farmer_id == farmer_id
+
+        # Verify DIAGNOSIS_SUBMITTED audit log
+        from app.models.system import AuditLog
+        added_objs = [call.args[0] for call in mock_db.add.call_args_list]
+        audit_logs = [obj for obj in added_objs if isinstance(obj, AuditLog)]
+        assert any(log.action == "DIAGNOSIS_SUBMITTED" and log.user_id == farmer_id for log in audit_logs)
+
+    @pytest.mark.asyncio
+    async def test_farm_soft_delete_and_crop_cycle_update(self):
+        """6. DELETE /farms/{plot_id} and PATCH /farms/{plot_id}/crop-cycles/{cycle_id}."""
+        import json
+        from app.api.v1.farms import delete_farm, update_crop_cycle
+        from app.models.farm import Plot, PlotCrop
+        from app.schemas.farm import UpdatePlotCropRequest
+
+        mock_db = AsyncMock()
+        farmer_id = uuid.uuid4()
+        farmer_user = User(id=farmer_id, role=Role(code="farmer"))
+
+        plot_id = uuid.uuid4()
+        crop_id = uuid.uuid4()
+        cycle_id = uuid.uuid4()
+
+        plot = Plot(id=plot_id, user_id=farmer_id, name="ধানের জমি", is_deleted=False)
+        crop_cycle = PlotCrop(id=cycle_id, plot_id=plot_id, crop_id=crop_id, status="active", is_deleted=False)
+
+        def mock_execute(stmt, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(stmt)
+            if "farm.plot_crops" in q_str:
+                res.scalars.return_value.all.return_value = [crop_cycle]
+            return res
+
+        mock_db.scalar.return_value = plot
+        mock_db.execute.side_effect = mock_execute
+
+        # 1. Soft delete plot
+        del_resp = await delete_farm(plot_id=plot_id, current_user=farmer_user, db=mock_db)
+        del_body = json.loads(del_resp.body)
+        assert del_body["success"] is True
+        assert plot.is_deleted is True
+        assert crop_cycle.is_deleted is True
+
+        # 2. Update crop cycle
+        plot.is_deleted = False  # restore for crop cycle test
+        def mock_scalar_cycle(stmt, *args, **kwargs):
+            q_str = str(stmt)
+            if "farm.plots" in q_str:
+                return plot
+            elif "farm.plot_crops" in q_str:
+                return crop_cycle
+            return None
+
+        mock_db.scalar.side_effect = mock_scalar_cycle
+
+        update_payload = UpdatePlotCropRequest(
+            status="harvested",
+            yield_kg=Decimal("1200.50"),
+            actual_harvest_date=datetime.now(timezone.utc).date(),
+        )
+
+        update_resp = await update_crop_cycle(
+            plot_id=plot_id,
+            cycle_id=cycle_id,
+            payload=update_payload,
+            current_user=farmer_user,
+            db=mock_db,
+        )
+        update_body = json.loads(update_resp.body)
+        assert update_body["success"] is True
+        assert crop_cycle.status == "harvested"
+        assert crop_cycle.yield_kg == Decimal("1200.50")

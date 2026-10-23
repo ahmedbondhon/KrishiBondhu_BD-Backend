@@ -93,11 +93,11 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     @property
     def effective_status(self) -> str:
-        if self.is_deleted:
+        if getattr(self, "is_deleted", False):
             return "deleted"
-        if not self.is_active:
+        if not getattr(self, "is_active", True):
             return "inactive"
-        return self.status
+        return getattr(self, "status", None) or "active"
 
 
     @property

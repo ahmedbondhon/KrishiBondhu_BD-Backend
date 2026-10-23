@@ -54,7 +54,8 @@ class AuthService:
         existing = await db.execute(
             select(User).where(User.phone_number == payload.phone_number)
         )
-        if existing.scalar_one_or_none():
+        existing_user = existing.scalar_one_or_none()
+        if existing_user and not getattr(existing_user, "is_deleted", False):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={
@@ -81,15 +82,24 @@ class AuthService:
                 detail={"code": "ROLE_NOT_PERMITTED", "message_bn": "শুধুমাত্র কৃষক হিসেবে সরাসরি নিবন্ধন করা যাবে।"},
             )
 
-
-        # 3. Create user
-        user = User(
-            phone_number=payload.phone_number,
-            password_hash=hash_password(payload.password),
-            full_name=payload.full_name,
-            role_id=role.id,
-        )
-        db.add(user)
+        # 3. Create or reactivate user
+        if existing_user and getattr(existing_user, "is_deleted", False):
+            existing_user.is_deleted = False
+            existing_user.deleted_at = None
+            existing_user.is_active = True
+            existing_user.full_name = payload.full_name
+            existing_user.password_hash = hash_password(payload.password)
+            existing_user.role_id = role.id
+            existing_user.updated_at = datetime.now(timezone.utc)
+            user = existing_user
+        else:
+            user = User(
+                phone_number=payload.phone_number,
+                password_hash=hash_password(payload.password),
+                full_name=payload.full_name,
+                role_id=role.id,
+            )
+            db.add(user)
         await db.flush()  # Get user.id without committing
 
         # Eagerly load role for response

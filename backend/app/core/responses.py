@@ -24,7 +24,8 @@ Error format:
     }
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
 import json
 import uuid
@@ -38,12 +39,14 @@ def _now_utc_iso() -> str:
 
 
 class _UUIDEncoder(json.JSONEncoder):
-    """JSON encoder that handles UUID and datetime objects."""
+    """JSON encoder that handles UUID, datetime, date, and Decimal objects."""
     def default(self, obj: Any) -> Any:
         if isinstance(obj, uuid.UUID):
             return str(obj)
-        if isinstance(obj, datetime):
+        if isinstance(obj, (datetime, date)):
             return obj.isoformat()
+        if isinstance(obj, Decimal):
+            return float(obj)
         return super().default(obj)
 
 

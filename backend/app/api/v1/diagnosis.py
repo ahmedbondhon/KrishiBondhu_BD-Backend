@@ -20,7 +20,7 @@ Routes (Expert-facing):
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -31,7 +31,7 @@ from app.models.advisory import Advisory
 from app.models.ai import AIPrediction
 from app.models.auth import User
 from app.models.catalog import Issue
-from app.models.diagnosis import CaseAssignment, DiagnosisCase
+from app.models.diagnosis import CaseAssignment, DiagnosisCase, ExpertProfile, ExpertReview
 from app.schemas.diagnosis import (
     AttachCaseImageRequest,
     CreateDiagnosisCaseRequest,
@@ -105,6 +105,7 @@ async def attach_image(
 )
 async def analyze_case(
     case_id: UUID,
+    request: Request,
     current_user: User = Depends(require_roles("farmer", "agent")),
     db: AsyncSession = Depends(get_db),
 ):
@@ -118,7 +119,16 @@ async def analyze_case(
 
     Safety Rule: If requires_expert_review=True, no unverified chemical
     dosages or treatment instructions are shown in the advisory.
+    Enforces rate limiting to prevent spamming the AI pipeline.
     """
+    from app.services.otp_service import ip_rate_limiter
+    client_ip = request.client.host if request.client else "127.0.0.1"
+    if not ip_rate_limiter.check_and_record(f"analyze_ip_{client_ip}", max_count=30, window_minutes=10):
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "RATE_LIMIT_EXCEEDED", "message_bn": "খুব বেশি বিশ্লেষণ প্রচেষ্টা হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।"},
+        )
+
     user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
     result = await diagnosis_service.analyze_case(db, case_id, current_user.id, user_role=user_role)
     return success_response(
@@ -218,10 +228,24 @@ async def get_case(
         for img in sorted(case.images, key=lambda x: (not x.is_primary, x.created_at))
     ]
 
+    expert_ids = [r.expert_id for r in case.expert_reviews if r.expert_id]
+    expert_profiles_map = {}
+    expert_users_map = {}
+    if expert_ids:
+        users_res = await db.execute(select(User).where(User.id.in_(expert_ids)))
+        for u in users_res.scalars().all():
+            expert_users_map[u.id] = u
+        prof_res = await db.execute(select(ExpertProfile).where(ExpertProfile.user_id.in_(expert_ids)))
+        for p in prof_res.scalars().all():
+            expert_profiles_map[p.user_id] = p
+
     expert_reviews_data = [
         {
             "id": str(r.id),
             "expert_id": str(r.expert_id),
+            "expert_name": expert_users_map[r.expert_id].full_name if r.expert_id in expert_users_map else (r.expert.full_name if getattr(r, "expert", None) else None),
+            "expert_designation": expert_profiles_map[r.expert_id].designation if r.expert_id in expert_profiles_map else None,
+            "expert_organization": expert_profiles_map[r.expert_id].organization if r.expert_id in expert_profiles_map else None,
             "agreed_with_ai": r.agreed_with_ai,
             "verified_issue_id": str(r.verified_issue_id) if r.verified_issue_id else None,
             "diagnosis_notes_bn": r.diagnosis_notes_bn,
@@ -369,6 +393,7 @@ async def submit_feedback(
 
 @expert_router.get("/cases", summary="Get the pending cases queue for agricultural experts")
 async def get_expert_cases(
+    status_filter: str = Query("escalated", description="Filter by status: escalated, expert_reviewed, all"),
     limit: int = Query(50, ge=1, le=200, description="Max cases to return"),
     offset: int = Query(0, ge=0, description="Pagination offset"),
     current_user: User = Depends(require_roles("expert", "admin")),
@@ -376,21 +401,32 @@ async def get_expert_cases(
     **kwargs,
 ):
     """
-    Returns all cases with status='escalated', prioritized by urgency.
-    Experts see cases assigned to them (or unassigned if admin).
+    Returns cases matching status_filter ('escalated', 'expert_reviewed', or 'all'), prioritized by urgency.
+    Experts see cases assigned to them (or unassigned/all if admin).
     """
-    query = select(DiagnosisCase).where(
-        DiagnosisCase.status == "escalated",
-        DiagnosisCase.is_deleted == False,
-    )
+    query = select(DiagnosisCase).where(DiagnosisCase.is_deleted == False)
+
+    if status_filter == "all":
+        query = query.where(DiagnosisCase.status.in_(["escalated", "expert_reviewed"]))
+    elif status_filter:
+        query = query.where(DiagnosisCase.status == status_filter)
+
     user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
     if user_role == "expert":
-        query = query.where(
-            or_(
-                DiagnosisCase.assigned_expert_id == current_user.id,
-                DiagnosisCase.assigned_expert_id.is_(None),
+        if status_filter == "expert_reviewed":
+            query = query.where(
+                or_(
+                    DiagnosisCase.assigned_expert_id == current_user.id,
+                    DiagnosisCase.expert_reviews.any(ExpertReview.expert_id == current_user.id),
+                )
             )
-        )
+        else:
+            query = query.where(
+                or_(
+                    DiagnosisCase.assigned_expert_id == current_user.id,
+                    DiagnosisCase.assigned_expert_id.is_(None),
+                )
+            )
     query = query.order_by(
         DiagnosisCase.urgency_level.desc(),
         DiagnosisCase.created_at.asc(),
@@ -411,7 +447,7 @@ async def get_expert_cases(
             }
             for c in cases
         ],
-        message=f"{len(cases)}টি কেস পর্যালোচনার জন্য আছে।",
+        message=f"{len(cases)}টি কেস পাওয়া গেছে।",
     )
 
 
