@@ -7,26 +7,40 @@ Inspects uploaded crop images using Gemini Vision to verify if:
 1. It is a genuine crop/plant image (not a selfie, document, animal, car, etc.).
 2. The detected crop matches the user's selected crop and is available in the system catalog.
 3. Automatically auto-selects if the user selected the wrong crop but provided a valid system crop.
+
+MVP Target Pilot Crops:
+  - Potato (আলু) - Solanum tuberosum
+  - Tomato (টমেটো) - Solanum lycopersicum
+  - Chili (মরিচ) - Capsicum annuum
 """
 
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Dynamic import with fallback to prevent Pylance missing import errors
 try:
-    import google.genai as genai
+    from google import genai
     from google.genai import types as genai_types
 except ImportError:
-    genai = None
-    genai_types = None
+    try:
+        import google.genai as genai
+        from google.genai import types as genai_types
+    except ImportError:
+        genai = None  # type: ignore
+        genai_types = None  # type: ignore
 
 from app.core.config import settings
 from app.models.catalog import Crop
 
 logger = logging.getLogger("krishibondhu.gatekeeper")
+
+# MVP Pilot Target Crops
+PILOT_CROPS: List[str] = ["potato", "tomato", "chili"]
 
 # Bengali crop name mapping
 CROP_BN_NAMES: Dict[str, str] = {
@@ -43,6 +57,13 @@ CROP_BN_NAMES: Dict[str, str] = {
     "garlic": "রসুন",
 }
 
+# Crop varieties mapping
+CROP_VARIETIES_BN: Dict[str, List[str]] = {
+    "potato": ["গ্রানোলা (Granola)", "অ্যাস্টারিক্স (Asterix)", "কার্ডিনাল (Cardinal)"],
+    "tomato": ["বারি টমেটো ১৪ (BARI Tomato 14)", "বারি টমেটো ১৫ (BARI Tomato 15)"],
+    "chili": ["বারি ঝালকা (BARI Jhalka)", "বগুড়া স্থানীয় ঝাল (Local Bogura)"],
+}
+
 
 class VerificationResult(BaseModel):
     is_crop: bool
@@ -55,10 +76,26 @@ class VerificationResult(BaseModel):
     message_bn: str
 
 
+def get_gemini_client() -> Optional[Any]:
+    """Instantiate and cache a Google GenAI Client if API key is configured."""
+    api_key = os.getenv("GEMINI_API_KEY", "") or getattr(settings, "gemini_api_key", "")
+    if genai and api_key:
+        try:
+            return genai.Client(api_key=api_key)
+        except Exception as e:
+            logger.warning(f"Failed to initialize Google GenAI Client: {e}")
+    return None
+
+
 async def get_system_available_crops(db: AsyncSession) -> List[str]:
     """Fetch active crop codes directly from catalog.crops database table."""
-    result = await db.execute(select(Crop.code).where(Crop.is_active == True))
-    return [row[0].lower().strip() for row in result.fetchall()]
+    try:
+        result = await db.execute(select(Crop.code).where(Crop.is_active == True))
+        crops = [row[0].lower().strip() for row in result.fetchall()]
+        return crops if crops else PILOT_CROPS
+    except Exception as exc:
+        logger.warning(f"Could not load crops from database, using PILOT_CROPS fallback: {exc}")
+        return PILOT_CROPS
 
 
 async def verify_crop_image_gatekeeper(
@@ -66,12 +103,15 @@ async def verify_crop_image_gatekeeper(
     image_bytes: bytes,
     mime_type: str,
     selected_crop: str,
-    available_crops: List[str],
+    available_crops: Optional[List[str]] = None,
     model_name: str = "gemini-1.5-flash",
 ) -> VerificationResult:
     """
-    Agricultural Image Verification Gatekeeper using Google Gemini Vision.
+    Strict Agricultural Image Verification Gatekeeper using Google Gemini Vision.
     """
+    if available_crops is None or len(available_crops) == 0:
+        available_crops = PILOT_CROPS
+
     normalized_selected = selected_crop.lower().strip() if selected_crop else "potato"
 
     prompt = f"""You are a strict Agricultural Image Verification Gatekeeper.
@@ -98,7 +138,7 @@ STEP 2: IDENTIFY THE CROP & SYNONYM NORMALIZATION
   * "alu" -> "potato"
   * "morich" or "chilli" or "pepper" -> "chili"
   * "paddy" or "dhan" -> "rice"
-  * "begun" or "eggplant" -> "brinjal"
+  * "begun" or "eggplant" or "aubergine" -> "brinjal"
   * "bhutta" or "corn" -> "maize"
   * "gom" -> "wheat"
 
@@ -144,6 +184,7 @@ Return ONLY a valid JSON object matching this schema without markdown or code fe
     if not gemini_client or not genai_types:
         # Fallback if Gemini client is not configured
         is_avail = normalized_selected in available_crops
+        crop_bn = CROP_BN_NAMES.get(normalized_selected, normalized_selected)
         return VerificationResult(
             is_crop=True,
             detected_crop=normalized_selected,
@@ -152,7 +193,7 @@ Return ONLY a valid JSON object matching this schema without markdown or code fe
             auto_selected=False,
             action_status="VALID_MATCH" if is_avail else "REJECT_NOT_AVAILABLE",
             final_selected_crop=normalized_selected if is_avail else None,
-            message_bn="ফসলের ছবিটি সঠিক আছে।" if is_avail else f"নির্বাচিত ফসলটি সিস্টেমে নেই।",
+            message_bn="ফসলের ছবিটি সঠিক আছে।" if is_avail else f"আপনি {crop_bn}-এর ছবি দিয়েছেন, কিন্তু এই ফসলটি বর্তমানে আমাদের সিস্টেমে নেই (Not Available)।",
         )
 
     try:
@@ -180,8 +221,8 @@ Return ONLY a valid JSON object matching this schema without markdown or code fe
 
     except Exception as exc:
         logger.error(f"Image gatekeeper validation failed: {exc}")
-        # Safe fallback in case of AI communication failure
         is_avail = normalized_selected in available_crops
+        crop_bn = CROP_BN_NAMES.get(normalized_selected, normalized_selected)
         return VerificationResult(
             is_crop=True,
             detected_crop=normalized_selected,
@@ -190,5 +231,5 @@ Return ONLY a valid JSON object matching this schema without markdown or code fe
             auto_selected=False,
             action_status="VALID_MATCH" if is_avail else "REJECT_NOT_AVAILABLE",
             final_selected_crop=normalized_selected if is_avail else None,
-            message_bn="ফসলের ছবিটি সঠিক আছে।" if is_avail else "নির্বাচিত ফসলটি সিস্টেমে নেই।",
+            message_bn="ফসলের ছবিটি সঠিক আছে।" if is_avail else f"আপনি {crop_bn}-এর ছবি দিয়েছেন, কিন্তু এই ফসলটি বর্তমানে আমাদের সিস্টেমে নেই (Not Available)।",
         )
