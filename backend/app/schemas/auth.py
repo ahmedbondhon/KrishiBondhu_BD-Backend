@@ -62,10 +62,11 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    """POST /api/v1/auth/login — Login with phone number (or email) and password."""
+    """POST /api/v1/auth/login — Login with phone number, email, or admin username and password."""
     model_config = ConfigDict(str_strip_whitespace=True)
 
     phone_number: Optional[str] = Field(default=None, description="Registered phone number")
+    username: Optional[str] = Field(default=None, description="Username (e.g. admin)")
     email: Optional[EmailStr] = Field(default=None, description="Registered email")
     password: str = Field(..., min_length=1)
     remember_me: bool = Field(default=False)
@@ -75,12 +76,15 @@ class LoginRequest(BaseModel):
     def normalize_phone(cls, v: Any) -> Optional[str]:
         if v is None:
             return None
+        s = str(v).strip().lower()
+        if s == "admin":
+            return "admin"
         return normalize_bd_phone(v)
 
     @model_validator(mode="after")
     def require_identifier(self):
-        if not self.phone_number and not self.email:
-            raise ValueError("Either phone_number or email is required")
+        if not self.phone_number and not self.email and not self.username:
+            raise ValueError("Either phone_number, username, or email is required")
         return self
 
 

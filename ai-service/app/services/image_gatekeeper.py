@@ -50,7 +50,9 @@ async def verify_crop_image_gatekeeper(
     mime_type: str,
     selected_crop: str,
     available_crops: List[str],
-    model_name: str = "gemini-1.5-flash",
+    model_name: str = "gemini-3.5-flash",
+    strict_crop_match: bool = True,
+    **kwargs: Any,
 ) -> VerificationResult:
     """
     Agricultural Image Verification Gatekeeper using Google Gemini Vision.

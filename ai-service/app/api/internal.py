@@ -34,7 +34,7 @@ router = APIRouter(prefix="/internal/v1")
 
 # ── Gemini Client Setup ───────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
 
 if GEMINI_API_KEY:
     _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -174,7 +174,7 @@ async def predict_crop_disease(payload: CropDiagnosisPredictRequest, request: Re
     The backend sends image_base64 after fetching the image from Supabase/S3 storage.
     """
     start = time.monotonic()
-    model_name = getattr(request.app.state, "model_name", "gemini-1.5-flash")
+    model_name = getattr(request.app.state, "model_name", GEMINI_MODEL)
 
     # ── Real Gemini inference ─────────────────────────────
     if _gemini_client and payload.image_base64:

@@ -105,6 +105,8 @@ class Settings(BaseSettings):
     # --- AI Service (Internal) ---
     ai_service_url: str = "http://localhost:8001"
     ai_confidence_threshold: float = 0.65  # Below this -> escalate to human expert
+    gemini_api_key: Optional[str] = None
+    gemini_model: str = "gemini-3.5-flash"
 
     # --- CORS ---
     cors_origins: List[str] = Field(

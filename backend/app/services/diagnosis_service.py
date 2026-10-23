@@ -32,7 +32,7 @@ from app.core.config import settings
 from app.models.advisory import Advisory, AdvisoryFeedback, AdvisoryTemplate
 from app.models.ai import AIModel, AIModelFeedback, AIPrediction, AIPredictionDetail
 from app.models.auth import User
-from app.models.catalog import GrowthStage, Issue, Remedy
+from app.models.catalog import Crop, GrowthStage, Issue, Remedy
 from app.models.farm import Plot, PlotCrop
 from app.models.diagnosis import (
     CaseAssignment,
@@ -106,7 +106,12 @@ class DiagnosisService:
     # ── Case Management ───────────────────────────────────────────
 
     async def create_case(
-        self, db: AsyncSession, farmer_id: uuid.UUID, payload: CreateDiagnosisCaseRequest
+        self,
+        db: AsyncSession,
+        farmer_id: uuid.UUID,
+        payload: CreateDiagnosisCaseRequest,
+        user_role: str = "farmer",
+        **kwargs,
     ) -> DiagnosisCase:
         """Create a new draft diagnosis case with cross-entity IDOR checks."""
         # 1. Validate plot_id belongs to the farmer
@@ -141,7 +146,7 @@ class DiagnosisService:
                 )
             # Ensure plot belongs to the farmer
             crop_plot = await db.get(Plot, plot_crop.plot_id)
-            if not crop_plot or crop_plot.is_deleted or (crop_plot.user_id != farmer_id and user_role not in ("admin", "administrator", "tech_admin", "agent")):
+            if not crop_plot or crop_plot.is_deleted or crop_plot.user_id != farmer_id:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail={"code": "FORBIDDEN", "message_bn": "অন্য কৃষকের জমির ফসল চক্র ব্যবহারের অনুমতি নেই।"},
@@ -238,6 +243,35 @@ class DiagnosisService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"code": "FILE_ALREADY_ATTACHED", "message_bn": "এই ফাইলটি ইতিমধ্যে অন্য একটি কেসে যুক্ত করা হয়েছে।"},
             )
+
+        # Gatekeeper image validation: verify attached image is a valid crop
+        if file_record and getattr(file_record, "mime_type", None) and file_record.mime_type.startswith("image/"):
+            file_bytes = await storage_service.get_file_bytes(file_record.storage_path)
+            if file_bytes:
+                from app.services.image_gatekeeper import (
+                    verify_crop_image_gatekeeper,
+                    get_system_available_crops,
+                    get_gemini_client,
+                )
+                avail_crops = await get_system_available_crops(db)
+                crop_code = "potato"
+                if case.crop_id:
+                    crop_row = await db.execute(select(Crop).where(Crop.id == case.crop_id))
+                    c_obj = crop_row.scalar_one_or_none()
+                    if c_obj:
+                        crop_code = c_obj.code
+                verification = await verify_crop_image_gatekeeper(
+                    gemini_client=get_gemini_client(),
+                    image_bytes=file_bytes,
+                    mime_type=file_record.mime_type,
+                    selected_crop=crop_code,
+                    available_crops=avail_crops,
+                )
+                if not verification.is_crop or verification.action_status == "REJECT_NOT_CROP":
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail={"code": "REJECT_NOT_CROP", "message_bn": verification.message_bn},
+                    )
 
         # If this image is primary, reset any previous primary images for this case
         if payload.is_primary:

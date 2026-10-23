@@ -28,6 +28,8 @@ Flow diagram:
     │←file bytes─────────────────────────── - │
 """
 
+from typing import Optional
+from pydantic import BaseModel
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
@@ -50,6 +52,13 @@ from app.core.config import settings
 
 # 5 MB maximum allowed file size
 MAX_FILE_SIZE_BYTES: int = getattr(settings, "max_file_size_bytes", 5 * 1024 * 1024)
+
+class VerifyCropImageRequest(BaseModel):
+    image_base64: Optional[str] = None
+    storage_path: Optional[str] = None
+    selected_crop: str = "potato"
+    mime_type: str = "image/jpeg"
+    strict_crop_match: bool = False
 
 router = APIRouter(prefix="/files", tags=["File Storage"])
 
@@ -180,6 +189,33 @@ async def confirm_upload(
             status_code=422,
             details=[{"field": "file_size_bytes", "message_bn": "স্টোরেজে আপলোডকৃত ফাইলের আকার সর্বোচ্চ ৫ MB সীমার বেশি।"}],
         )
+    # Strict Agricultural Gatekeeper Image Verification
+    # If the file is for a crop diagnosis case or crop catalog, verify it is a valid crop
+    is_crop_entity = payload.entity_type in ("diagnosis_case", "crops", "crop_image", "case_image", "crop")
+    if is_crop_entity and payload.mime_type.startswith("image/"):
+        file_bytes = await storage_service.get_file_bytes(payload.storage_path)
+        if file_bytes:
+            from app.services.image_gatekeeper import (
+                verify_crop_image_gatekeeper,
+                get_system_available_crops,
+                get_gemini_client,
+            )
+            avail_crops = await get_system_available_crops(db)
+            verification = await verify_crop_image_gatekeeper(
+                gemini_client=get_gemini_client(),
+                image_bytes=file_bytes,
+                mime_type=payload.mime_type,
+                selected_crop="potato",
+                available_crops=avail_crops,
+            )
+            if not verification.is_crop or verification.action_status == "REJECT_NOT_CROP":
+                await storage_service.delete_file(payload.storage_path)
+                return error_response(
+                    message="Image rejected: Not a valid crop image",
+                    error_code="REJECT_NOT_CROP",
+                    status_code=422,
+                    details=[{"field": "file", "message_bn": verification.message_bn}],
+                )
 
     system_file = SystemFile(
         uploaded_by=current_user.id,
@@ -245,4 +281,96 @@ async def get_view_url(
             expires_in_seconds=settings.storage_signed_url_expiry_seconds,
         ).model_dump(),
         message="ভিউ URL প্রস্তুত।",
+    )
+
+
+@router.post("/verify-crop-image", summary="Verify whether image is a valid crop using Gatekeeper")
+async def verify_crop_image(
+    payload: VerifyCropImageRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Agricultural Gatekeeper inspection endpoint.
+    Inspects image bytes (base64 or storage_path) to ensure it is not a selfie,
+    document, animal, or non-plant, and validates matching crop catalog.
+    """
+    import base64
+    from app.services.image_gatekeeper import (
+        verify_crop_image_gatekeeper,
+        get_system_available_crops,
+        get_gemini_client,
+    )
+
+    img_bytes: Optional[bytes] = None
+    mime = payload.mime_type or "image/jpeg"
+
+    if payload.image_base64:
+        raw_b64 = payload.image_base64
+        if "data:" in raw_b64 and ";base64," in raw_b64:
+            header, raw_b64 = raw_b64.split(";base64,", 1)
+            if "data:" in header:
+                mime = header.replace("data:", "").strip()
+        try:
+            img_bytes = base64.b64decode(raw_b64)
+        except Exception:
+            return error_response(
+                message="Invalid base64 image data",
+                error_code="INVALID_BASE64",
+                status_code=400,
+                details=[{"field": "image_base64", "message_bn": "ইমেজের ডাটা সঠিক নয়।"}],
+            )
+    elif payload.storage_path:
+        img_bytes = await storage_service.get_file_bytes(payload.storage_path)
+        if not img_bytes:
+            return error_response(
+                message="File not found in storage",
+                error_code="FILE_NOT_FOUND",
+                status_code=404,
+                details=[{"field": "storage_path", "message_bn": "স্টোরেজে ফাইলটি পাওয়া যায়নি।"}],
+            )
+
+    if not img_bytes:
+        return error_response(
+            message="No image provided",
+            error_code="NO_IMAGE",
+            status_code=400,
+            details=[{"field": "image_base64", "message_bn": "কোনো ছবি প্রদান করা হয়নি।"}],
+        )
+
+    avail_crops = await get_system_available_crops(db)
+    verification = await verify_crop_image_gatekeeper(
+        gemini_client=get_gemini_client(),
+        image_bytes=img_bytes,
+        mime_type=mime,
+        selected_crop=payload.selected_crop,
+        available_crops=avail_crops,
+    )
+
+    if getattr(payload, "strict_crop_match", True) and not verification.is_user_selection_correct and verification.is_crop:
+        verification.action_status = "REJECT_CROP_MISMATCH"
+        verification.auto_selected = False
+
+    if not verification.is_crop or verification.action_status in (
+        "REJECT_NOT_CROP",
+        "REJECT_CROP_MISMATCH",
+        "REJECT_NOT_AVAILABLE",
+    ):
+        return error_response(
+            message=verification.message_bn,
+            error_code=verification.action_status,
+            status_code=422,
+            details=[
+                {
+                    "field": "crop",
+                    "action_status": verification.action_status,
+                    "detected_crop": verification.detected_crop,
+                    "selected_crop": payload.selected_crop,
+                    "message_bn": verification.message_bn,
+                }
+            ],
+        )
+
+    return success_response(
+        data=verification.model_dump(),
+        message=verification.message_bn,
     )

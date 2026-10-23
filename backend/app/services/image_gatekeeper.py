@@ -141,7 +141,10 @@ def _inspect_image_heuristic(image_bytes: bytes) -> tuple[bool, str, Optional[st
         (is_crop: bool, classification_reason: str, detected_crop: Optional[str])
     """
     try:
-        import pymupdf
+        try:
+            import pymupdf  # type: ignore[import-untyped, import-not-found]
+        except ImportError:
+            import fitz as pymupdf  # type: ignore[import-untyped, import-not-found]
         import numpy as np
 
         pix = pymupdf.Pixmap(image_bytes)
@@ -218,13 +221,17 @@ async def verify_crop_image_gatekeeper(
     mime_type: str,
     selected_crop: str,
     available_crops: Optional[List[str]] = None,
-    model_name: str = "gemini-1.5-flash",
+    model_name: Optional[str] = None,
+    strict_crop_match: bool = False,
+    **kwargs: Any,
 ) -> VerificationResult:
     """
     Strict Agricultural Image Verification Gatekeeper.
     Uses Google Gemini Vision if available, with intelligent Computer Vision
     heuristics fallback to reject selfies and non-crop photos.
     """
+    if not model_name:
+        model_name = os.getenv("GEMINI_MODEL") or getattr(settings, "gemini_model", "gemini-3.5-flash-lite")
     if not available_crops:
         available_crops = PILOT_CROPS
     else:
@@ -347,7 +354,20 @@ async def verify_crop_image_gatekeeper(
             message_bn="ফসলের ছবিটি সঠিক আছে।",
         )
 
-    # Condition: Mismatch -> Auto-select
+    # Condition: Mismatch
+    selected_bn = CROP_BN_NAMES.get(normalized_selected, normalized_selected)
+    if strict_crop_match:
+        return VerificationResult(
+            is_crop=True,
+            detected_crop=detected_crop,
+            is_available=True,
+            is_user_selection_correct=False,
+            auto_selected=False,
+            action_status="REJECT_CROP_MISMATCH",
+            final_selected_crop=detected_crop,
+            message_bn=f"ফসলের অমিল: আপনি '{selected_bn}' নির্বাচন করেছেন, কিন্তু আপলোডকৃত ছবিটি '{crop_bn}'-এর পাতা হিসেবে শনাক্ত হয়েছে। অনুগ্রহ করে '{crop_bn}' নির্বাচন করুন অথবা '{selected_bn}'-এর পাতার ছবি আপলোড করুন।",
+        )
+
     return VerificationResult(
         is_crop=True,
         detected_crop=detected_crop,
@@ -356,31 +376,40 @@ async def verify_crop_image_gatekeeper(
         auto_selected=True,
         action_status="VALID_AUTO_SELECTED",
         final_selected_crop=detected_crop,
-        message_bn=f"আপনি ভুল ফসল সিলেক্ট করেছিলেন। ছবি দেখে স্বয়ংক্রিয়ভাবে '{crop_bn}' সিলেক্ট করা হয়েছে।",
+        message_bn=f"ছবি দেখে স্বয়ংক্রিয়ভাবে '{crop_bn}' নির্বাচন করা হয়েছে (আগে '{selected_bn}' নির্বাচিত ছিল)।",
     )
 
 
 if __name__ == "__main__":
     import numpy as np
-    import pymupdf
+
+    try:
+        import pymupdf  # type: ignore[import-untyped, import-not-found]
+    except ImportError:
+        try:
+            import fitz as pymupdf  # type: ignore[import-untyped, import-not-found]
+        except ImportError:
+            pymupdf = None  # type: ignore
 
     print("🌾 Testing Agricultural Image Verification Gatekeeper Service...")
 
-    # Create dummy selfie image (skin tones: R=210, G=160, B=130)
-    selfie_pix = pymupdf.Pixmap(pymupdf.csRGB, (0, 0, 150, 150), False)
-    selfie_arr = np.frombuffer(selfie_pix.samples, dtype=np.uint8).reshape(150, 150, 3)
-    selfie_arr[:, :] = [210, 160, 130]
-    selfie_bytes = selfie_pix.tobytes("png")
+    if pymupdf is not None:
+        # Create dummy selfie image (skin tones: R=210, G=160, B=130)
+        selfie_data = np.full((150, 150, 3), [210, 160, 130], dtype=np.uint8)
+        selfie_pix = pymupdf.Pixmap(pymupdf.csRGB, 150, 150, selfie_data.tobytes(), False)
+        selfie_bytes = selfie_pix.tobytes("png")
 
-    # Create dummy leaf image (green tones: R=45, G=150, B=40)
-    leaf_pix = pymupdf.Pixmap(pymupdf.csRGB, (0, 0, 150, 150), False)
-    leaf_arr = np.frombuffer(leaf_pix.samples, dtype=np.uint8).reshape(150, 150, 3)
-    leaf_arr[:, :] = [45, 150, 40]
-    leaf_bytes = leaf_pix.tobytes("png")
+        # Create dummy leaf image (green tones: R=45, G=150, B=40)
+        leaf_data = np.full((150, 150, 3), [45, 150, 40], dtype=np.uint8)
+        leaf_pix = pymupdf.Pixmap(pymupdf.csRGB, 150, 150, leaf_data.tobytes(), False)
+        leaf_bytes = leaf_pix.tobytes("png")
+    else:
+        selfie_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+        leaf_bytes = selfie_bytes
 
     async def run_tests():
         res_selfie = await verify_crop_image_gatekeeper(
-            gemini_client=None,
+            gemini_client=False,
             image_bytes=selfie_bytes,
             mime_type="image/png",
             selected_crop="potato",
@@ -392,7 +421,7 @@ if __name__ == "__main__":
         assert res_selfie.is_crop is False, "Selfie should be REJECTED!"
 
         res_leaf = await verify_crop_image_gatekeeper(
-            gemini_client=None,
+            gemini_client=False,
             image_bytes=leaf_bytes,
             mime_type="image/png",
             selected_crop="potato",
