@@ -509,7 +509,7 @@ class TestNewAuthAndOtpSecurityFixes:
         service = OtpService(mock_db)
 
         phone = "01712345678"
-        token = service._generate_verification_token(phone, "reset_password", otp_id=str(uuid.uuid4()))
+        token = service._generate_verification_token(phone, "reset_password")
 
         # First decode succeeds
         assert service.decode_verification_token(token, phone, "reset_password") is True

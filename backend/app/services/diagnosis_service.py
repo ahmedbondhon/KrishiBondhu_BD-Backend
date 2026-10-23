@@ -183,6 +183,7 @@ class DiagnosisService:
         farmer_id: uuid.UUID,
         payload: AttachCaseImageRequest,
         user_role: str = "farmer",
+        **kwargs,
     ) -> CaseImage:
         """Attach a confirmed uploaded file to a diagnosis case."""
         # Verify case belongs to this farmer (or user is agent/admin)
@@ -232,7 +233,7 @@ class DiagnosisService:
     # ── AI Analysis ───────────────────────────────────────────────
 
     async def analyze_case(
-        self, db: AsyncSession, case_id: uuid.UUID, farmer_id: uuid.UUID, user_role: str = "farmer"
+        self, db: AsyncSession, case_id: uuid.UUID, farmer_id: uuid.UUID, user_role: str = "farmer", **kwargs
     ) -> DiagnosisResponse:
         """
         Trigger the full AI analysis pipeline for a diagnosis case.
@@ -817,6 +818,7 @@ class DiagnosisService:
         case_id: uuid.UUID,
         farmer_id: uuid.UUID,
         user_role: str = "farmer",
+        **kwargs,
     ) -> DiagnosisCase:
         """
         Farmer explicitly requests expert review for an existing case.
@@ -886,6 +888,7 @@ class DiagnosisService:
         farmer_id: uuid.UUID,
         payload: SubmitFeedbackRequest,
         user_role: str = "farmer",
+        **kwargs,
     ) -> AdvisoryFeedback:
         """Record farmer's outcome feedback for the advisory received."""
         # 1. Verify case ownership (farmer can only submit feedback for their own case, or agent on their behalf)
@@ -934,7 +937,7 @@ class DiagnosisService:
     # ── Helpers ───────────────────────────────────────────────────
 
     async def _get_case_for_farmer(
-        self, db: AsyncSession, case_id: uuid.UUID, farmer_id: uuid.UUID, user_role: str = "farmer"
+        self, db: AsyncSession, case_id: uuid.UUID, farmer_id: uuid.UUID, user_role: str = "farmer", **kwargs
     ) -> DiagnosisCase:
         """Load a case, verifying it belongs to the requesting farmer (or agent/admin/expert)."""
         stmt = select(DiagnosisCase).where(

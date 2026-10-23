@@ -116,7 +116,9 @@ class OtpService:
         self.db = db
         self.repo = AuthRepository(db)
 
-    def _generate_verification_token(self, phone: str, purpose: str, otp_id: str | None = None) -> str:
+    def _generate_verification_token(
+        self, phone: str, purpose: str, otp_id: str | None = None, **kwargs
+    ) -> str:
         phone_norm = normalize_bd_phone(phone)
         now = datetime.now(timezone.utc)
         payload = {
