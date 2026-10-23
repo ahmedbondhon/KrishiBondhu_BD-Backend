@@ -22,7 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.dependencies import get_current_user, get_db, require_roles
 from app.core.responses import success_response
 from app.models.auth import User
+from app.models.catalog import Crop, CropVariety, GrowthStage
 from app.models.farm import Plot, PlotCrop
+from app.models.geo import District, Division, Union, Upazila
 from app.schemas.farm import CreatePlotCropRequest, CreatePlotRequest, PlotCropResponse, PlotResponse
 
 router = APIRouter(prefix="/farms", tags=["Farms & Crop Cycles"])
@@ -35,11 +37,46 @@ async def create_farm(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Register a new land plot owned by the current farmer.
+    Register a new land plot owned by the current farmer (or created on behalf by agent/admin).
     Area can be in bigha (traditional Bangladesh unit) or square meters.
     """
+    target_user_id = current_user.id
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if current_user.role else "")
+    if user_role in ("agent", "admin", "administrator", "tech_admin", "technical_admin") and payload.farmer_id:
+        target_user_id = payload.farmer_id
+
+    # Geographic hierarchy validation (Bug 1.3)
+    if payload.division_id:
+        div = await db.scalar(select(Division.id).where(Division.id == payload.division_id, Division.is_active == True))
+        if not div:
+            raise HTTPException(status_code=400, detail={"code": "INVALID_GEO", "message_bn": "বিভাগটি খুঁজে পাওয়া যায়নি।"})
+
+    if payload.district_id:
+        dist_stmt = select(District.id).where(District.id == payload.district_id, District.is_active == True)
+        if payload.division_id:
+            dist_stmt = dist_stmt.where(District.division_id == payload.division_id)
+        dist = await db.scalar(dist_stmt)
+        if not dist:
+            raise HTTPException(status_code=400, detail={"code": "INVALID_GEO", "message_bn": "জেলাটি নির্বাচিত বিভাগের আওতাভুক্ত নয়।"})
+
+    if payload.upazila_id:
+        upz_stmt = select(Upazila.id).where(Upazila.id == payload.upazila_id, Upazila.is_active == True)
+        if payload.district_id:
+            upz_stmt = upz_stmt.where(Upazila.district_id == payload.district_id)
+        upz = await db.scalar(upz_stmt)
+        if not upz:
+            raise HTTPException(status_code=400, detail={"code": "INVALID_GEO", "message_bn": "উপজেলাটি নির্বাচিত জেলার আওতাভুক্ত নয়।"})
+
+    if payload.union_id:
+        union_stmt = select(Union.id).where(Union.id == payload.union_id, Union.is_active == True)
+        if payload.upazila_id:
+            union_stmt = union_stmt.where(Union.upazila_id == payload.upazila_id)
+        un = await db.scalar(union_stmt)
+        if not un:
+            raise HTTPException(status_code=400, detail={"code": "INVALID_GEO", "message_bn": "ইউনিয়নটি নির্বাচিত উপজেলার আওতাভুক্ত নয়।"})
+
     plot = Plot(
-        user_id=current_user.id,
+        user_id=target_user_id,
         name=payload.name,
         area_bigha=payload.area_bigha,
         area_sqm=payload.area_sqm,
@@ -89,23 +126,56 @@ async def create_crop_cycle(
 ):
     """
     Assign a crop cultivation cycle to a plot.
-    The crop, variety, and current growth stage are all optional at creation.
+    Validates crop_id, variety_id, and current_stage_id relationships.
     """
-    # Verify plot ownership
-    result = await db.execute(
-        select(Plot).where(
-            Plot.id == plot_id,
-            Plot.user_id == current_user.id,
-            Plot.is_deleted == False,
-        )
-    )
+    # Verify plot ownership / access
+    plot_stmt = select(Plot).where(Plot.id == plot_id, Plot.is_deleted == False)
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if current_user.role else "")
+    if user_role not in ("admin", "administrator", "tech_admin", "technical_admin", "agent"):
+        plot_stmt = plot_stmt.where(Plot.user_id == current_user.id)
+    result = await db.execute(plot_stmt)
     plot = result.scalar_one_or_none()
     if not plot:
-        from fastapi import HTTPException, status
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "PLOT_NOT_FOUND", "message_bn": "জমিটি পাওয়া যায়নি।"},
         )
+
+    # Verify crop exists (Bug 1.3)
+    crop = await db.scalar(select(Crop.id).where(Crop.id == payload.crop_id, Crop.is_active == True))
+    if not crop:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "CROP_NOT_FOUND", "message_bn": "ফসলটি পাওয়া যায়নি।"},
+        )
+
+    # Verify variety belongs to crop (Bug 1.3)
+    if payload.variety_id:
+        variety = await db.scalar(
+            select(CropVariety.id).where(
+                CropVariety.id == payload.variety_id,
+                CropVariety.crop_id == payload.crop_id,
+            )
+        )
+        if not variety:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_VARIETY", "message_bn": "জাতটি নির্বাচিত ফসলের সাথে মেলে না।"},
+            )
+
+    # Verify growth stage belongs to crop (Bug 1.3)
+    if payload.current_stage_id:
+        stage = await db.scalar(
+            select(GrowthStage.id).where(
+                GrowthStage.id == payload.current_stage_id,
+                GrowthStage.crop_id == payload.crop_id,
+            )
+        )
+        if not stage:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "INVALID_GROWTH_STAGE", "message_bn": "বৃদ্ধির পর্যায়টি নির্বাচিত ফসলের সাথে মেলে না।"},
+            )
 
     crop_cycle = PlotCrop(
         plot_id=plot.id,

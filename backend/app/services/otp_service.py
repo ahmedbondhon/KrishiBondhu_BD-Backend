@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import threading
 import time
+import uuid
 
 from fastapi import HTTPException
 from jose import JWTError, jwt
@@ -70,7 +71,7 @@ class SmsSimulatorInbox:
 
 
 class IpRateLimiter:
-    """Simple in-memory per-IP rate limiter."""
+    """Simple in-memory per-IP rate limiter with cleanup to prevent memory leaks."""
 
     def __init__(self):
         self._store: dict[str, list[float]] = defaultdict(list)
@@ -79,15 +80,33 @@ class IpRateLimiter:
     def check_and_record(self, ip: str, max_count: int, window_minutes: int) -> bool:
         now, cutoff = time.time(), time.time() - (window_minutes * 60)
         with self._lock:
-            self._store[ip] = [t for t in self._store[ip] if t > cutoff]
-            if len(self._store[ip]) >= max_count:
+            active_timestamps = [t for t in self._store[ip] if t > cutoff]
+            if not active_timestamps:
+                self._store.pop(ip, None)
+            else:
+                self._store[ip] = active_timestamps
+
+            if len(self._store.get(ip, [])) >= max_count:
                 return False
+
+            if ip not in self._store:
+                self._store[ip] = []
             self._store[ip].append(now)
+
+            # Periodic cleanup of whole store if size exceeds threshold (Bug 4.2)
+            if len(self._store) > 1000:
+                for k in list(self._store.keys()):
+                    self._store[k] = [t for t in self._store[k] if t > cutoff]
+                    if not self._store[k]:
+                        self._store.pop(k, None)
+
             return True
 
 
 sms_inbox = SmsSimulatorInbox()
 ip_rate_limiter = IpRateLimiter()
+
+_consumed_verification_tokens: set[str] = set()
 
 
 class OtpService:
@@ -97,18 +116,52 @@ class OtpService:
         self.db = db
         self.repo = AuthRepository(db)
 
-    def _generate_verification_token(self, phone: str, purpose: str) -> str:
+    def _generate_verification_token(self, phone: str, purpose: str, otp_id: str | None = None) -> str:
         phone_norm = normalize_bd_phone(phone)
         now = datetime.now(timezone.utc)
+        payload = {
+            "sub": phone_norm,
+            "phone": phone_norm,
+            "purpose": purpose,
+            "type": "phone_verification",
+            "jti": str(uuid.uuid4()),
+            "iat": now,
+            "exp": now + timedelta(minutes=10),
+        }
+        if otp_id:
+            payload["otp_id"] = str(otp_id)
         return jwt.encode(
-            {"sub": phone_norm, "phone": phone_norm, "purpose": purpose, "type": "phone_verification", "iat": now, "exp": now + timedelta(minutes=10)},
+            payload,
             settings.jwt_secret_key,
             algorithm=settings.jwt_algorithm,
         )
 
-    def decode_verification_token(self, token: str, expected_phone: str, expected_purpose: str) -> bool:
+    def consume_verification_token(self, token: str) -> None:
+        """Mark token as consumed to prevent replay attacks (Bug 2.1)."""
         try:
             payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+            jti = payload.get("jti")
+            if jti:
+                _consumed_verification_tokens.add(jti)
+            otp_id = payload.get("otp_id")
+            if otp_id:
+                _consumed_verification_tokens.add(otp_id)
+        except Exception:
+            pass
+        _consumed_verification_tokens.add(token)
+
+    def decode_verification_token(self, token: str, expected_phone: str, expected_purpose: str) -> bool:
+        if token in _consumed_verification_tokens:
+            return False
+        try:
+            payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+            jti = payload.get("jti")
+            if jti and jti in _consumed_verification_tokens:
+                return False
+            otp_id = payload.get("otp_id")
+            if otp_id and otp_id in _consumed_verification_tokens:
+                return False
+
             return (
                 (payload.get("phone") or payload.get("sub")) == normalize_bd_phone(expected_phone)
                 and payload.get("purpose") == expected_purpose
@@ -186,7 +239,7 @@ class OtpService:
             "message": "OTP verified successfully.",
             "phone_number": phone,
             "is_verified": True,
-            "verification_token": self._generate_verification_token(phone, purpose),
+            "verification_token": self._generate_verification_token(phone, purpose, otp_id=str(record.id)),
         }
 
     async def is_verified(

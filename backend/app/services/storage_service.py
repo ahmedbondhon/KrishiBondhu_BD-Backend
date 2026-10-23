@@ -113,8 +113,32 @@ class StorageService:
             - storage_path : The object key (path) in the bucket, to be
                              passed back in the confirm-upload step.
         """
-        # Build a user-scoped, collision-resistant storage path
-        file_ext = original_name.rsplit(".", 1)[-1].lower() if "." in original_name else "bin"
+        # Determine file extension safely from validated mime_type (Bug 4.1)
+        mime_to_ext = {
+            "image/jpeg": "jpg",
+            "image/jpg": "jpg",
+            "image/png": "png",
+            "image/webp": "webp",
+            "audio/mp4": "m4a",
+            "audio/m4a": "m4a",
+            "audio/mpeg": "mp3",
+            "audio/mp3": "mp3",
+            "audio/wav": "wav",
+            "audio/x-wav": "wav",
+            "audio/ogg": "ogg",
+            "audio/webm": "webm",
+            "application/pdf": "pdf",
+        }
+        mime_clean = mime_type.lower().strip()
+        if mime_clean in mime_to_ext:
+            file_ext = mime_to_ext[mime_clean]
+        else:
+            raw_ext = original_name.rsplit(".", 1)[-1].lower() if "." in original_name else "bin"
+            if raw_ext in ("html", "htm", "php", "js", "exe", "sh", "py", "phtml", "svg", "cgi"):
+                file_ext = "bin"
+            else:
+                file_ext = raw_ext
+
         folder = entity_type or "misc"
         file_uuid = uuid.uuid4()
         user_prefix = f"{user_id}/" if user_id else ""

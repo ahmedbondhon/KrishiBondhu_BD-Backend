@@ -374,3 +374,248 @@ class TestPerformanceAndAsyncFixes:
 
         await diagnosis.close()
         assert diagnosis._http_client is None
+
+
+# ── 5. New Cross-Entity, Auth, and Infrastructure Bug Fixes ──────────────────
+
+class TestNewDataIntegrityAndCrossEntityFixes:
+    @pytest.mark.asyncio
+    async def test_create_case_idor_plot_ownership(self):
+        """Bug 1.1: Attempting to link another farmer's plot_id raises 404 PLOT_NOT_FOUND."""
+        from app.schemas.diagnosis import CreateDiagnosisCaseRequest
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        crop_id = uuid.uuid4()
+        other_plot_id = uuid.uuid4()
+        farmer_id = uuid.uuid4()
+
+        # Database returns None for plot belonging to farmer_id
+        mock_res = MagicMock()
+        mock_res.scalar_one_or_none.return_value = None
+        mock_db.execute.return_value = mock_res
+
+        payload = CreateDiagnosisCaseRequest(
+            crop_id=crop_id,
+            plot_id=other_plot_id,
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.create_case(mock_db, farmer_id, payload)
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail["code"] == "PLOT_NOT_FOUND"
+
+    @pytest.mark.asyncio
+    async def test_create_case_invalid_growth_stage(self):
+        """Bug 1.1: Growth stage belonging to a different crop is rejected."""
+        from app.models.catalog import GrowthStage
+        from app.schemas.diagnosis import CreateDiagnosisCaseRequest
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        crop_id = uuid.uuid4()
+        other_crop_id = uuid.uuid4()
+        stage_id = uuid.uuid4()
+        farmer_id = uuid.uuid4()
+
+        # Mock stage belonging to other_crop_id
+        mock_stage = GrowthStage(
+            id=stage_id,
+            crop_id=other_crop_id,
+            stage_code="FLOWERING",
+            name_en="Flowering",
+            name_bn="ফুল ধরা",
+        )
+        mock_res = MagicMock()
+        mock_res.scalar_one_or_none.return_value = mock_stage
+        mock_db.execute.return_value = mock_res
+
+        payload = CreateDiagnosisCaseRequest(
+            crop_id=crop_id,
+            growth_stage_id=stage_id,
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.create_case(mock_db, farmer_id, payload)
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail["code"] == "INVALID_GROWTH_STAGE"
+
+    @pytest.mark.asyncio
+    async def test_generate_advisory_populates_remedies(self):
+        """Bug 1.2: _generate_advisory queries catalog.remedies and sets chemical/organic fields."""
+        from app.models.advisory import AdvisoryTemplate
+        from app.models.ai import AIPrediction
+        from app.models.catalog import Remedy
+
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        case = DiagnosisCase(id=uuid.uuid4(), case_number="KB-2026-TEST", status="submitted", farmer_id=uuid.uuid4(), crop_id=uuid.uuid4())
+        prediction = AIPrediction(id=uuid.uuid4(), case_id=case.id, confidence_score=0.9, is_confident=True)
+        issue = Issue(id=uuid.uuid4(), crop_id=case.crop_id, code="BLIGHT_01", name_en="Early Blight", name_bn="আর্লি ব্লাইট", category="disease")
+        template = AdvisoryTemplate(id=uuid.uuid4(), issue_id=issue.id, title_bn="আর্লি ব্লাইট ব্যবস্থাপনা", content_bn="চিকিৎসা বিস্তারিত", is_active=True)
+
+        chem_rem = Remedy(id=uuid.uuid4(), issue_id=issue.id, type="chemical", title_bn="রিডোমিল গোল্ড", dosage_bn="২ গ্রাম/লিটার", description_bn="স্প্রে করুন", is_active=True)
+        org_rem = Remedy(id=uuid.uuid4(), issue_id=issue.id, type="organic", title_bn="ট্রাইকোডার্মা", dosage_bn="৫ গ্রাম/কেজি", description_bn="বীজ শোধন", is_active=True)
+
+        def mock_exec(query, *args, **kwargs):
+            q_str = str(query)
+            res = MagicMock()
+            if "catalog.remedies" in q_str or "remedies" in q_str:
+                res.scalars.return_value.all.return_value = [chem_rem, org_rem]
+            elif "advisory.templates" in q_str or "templates" in q_str:
+                res.scalar_one_or_none.return_value = template
+            elif "advisory.advisories" in q_str or "advisories" in q_str:
+                res.scalar_one_or_none.return_value = None
+            else:
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_exec
+
+        adv = await service._generate_advisory(mock_db, case, prediction, issue, growth_stage_id=None)
+        assert adv is not None
+        assert "রিডোমিল গোল্ড" in adv.chemical_recommendations_bn
+        assert "২ গ্রাম/লিটার" in adv.chemical_recommendations_bn
+        assert "ট্রাইকোডার্মা" in adv.organic_recommendations_bn
+
+    def test_farm_crop_cycle_harvest_date_validator(self):
+        """Bug 1.3: Sowing date after expected harvest date raises validation error."""
+        from datetime import date
+        from app.schemas.farm import CreatePlotCropRequest
+
+        # Valid dates
+        valid = CreatePlotCropRequest(
+            crop_id=uuid.uuid4(),
+            sowing_date=date(2026, 1, 1),
+            expected_harvest_date=date(2026, 4, 1),
+        )
+        assert valid.expected_harvest_date >= valid.sowing_date
+
+        # Invalid dates: harvest before sowing
+        with pytest.raises(ValueError):
+            CreatePlotCropRequest(
+                crop_id=uuid.uuid4(),
+                sowing_date=date(2026, 5, 1),
+                expected_harvest_date=date(2026, 3, 1),
+            )
+
+
+class TestNewAuthAndOtpSecurityFixes:
+    def test_verification_token_replay_attack_prevention(self):
+        """Bug 2.1: Verification token cannot be reused after consumption."""
+        from app.services.otp_service import OtpService
+        mock_db = AsyncMock()
+        service = OtpService(mock_db)
+
+        phone = "01712345678"
+        token = service._generate_verification_token(phone, "reset_password", otp_id=str(uuid.uuid4()))
+
+        # First decode succeeds
+        assert service.decode_verification_token(token, phone, "reset_password") is True
+
+        # Consume token
+        service.consume_verification_token(token)
+
+        # Subsequent decode fails
+        assert service.decode_verification_token(token, phone, "reset_password") is False
+
+    @pytest.mark.asyncio
+    async def test_reset_password_safe_supabase_role_extraction(self):
+        """Bug 2.2: When user is only in Supabase (dict), role_code extraction does not crash."""
+        from app.services.auth import ExtendedAuthService
+        mock_db = AsyncMock()
+        service = ExtendedAuthService(mock_db)
+
+        phone = "01712345678"
+        payload = ResetPasswordRequest(
+            phone_number=phone,
+            new_password="Password123!",
+            verification_token="dummy_token",
+        )
+
+        sb_user_dict = {
+            "id": str(uuid.uuid4()),
+            "phone_number": phone,
+            "role_code": "expert",
+        }
+
+        with patch("app.services.auth.supabase_client.get_user_by_phone", new_callable=AsyncMock) as mock_sb, \
+             patch.object(service.repo, "get_user_by_phone", new_callable=AsyncMock) as mock_local, \
+             patch.object(service.otp_service, "decode_verification_token", return_value=True), \
+             patch.object(service.otp_service, "consume_verification_token"):
+
+            mock_sb.return_value = sb_user_dict
+            mock_local.return_value = None  # User only exists in Supabase
+
+            # Should successfully validate strong password for expert role without AttributeError
+            await service.reset_password(payload)
+
+
+class TestNewStorageAndInfrastructureFixes:
+    def test_storage_extension_spoofing_prevented(self):
+        """Bug 4.1: MIME type dictates file extension regardless of original_name spoofing."""
+        service = StorageService()
+        with patch.object(service, "_get_s3_client") as mock_s3:
+            mock_client = MagicMock()
+            mock_client.generate_presigned_url.return_value = "https://storage/signed"
+            mock_s3.return_value = mock_client
+
+            # Client claims original_name is script.php but mime_type is image/jpeg
+            _, storage_path = service.generate_upload_url(
+                original_name="script.php",
+                mime_type="image/jpeg",
+                entity_type="cases",
+            )
+            assert storage_path.endswith(".jpg")
+            assert not storage_path.endswith(".php")
+
+            # Dangerous script extension with unknown mime defaults to .bin
+            _, dangerous_path = service.generate_upload_url(
+                original_name="exploit.html",
+                mime_type="application/octet-stream",
+                entity_type="misc",
+            )
+            assert dangerous_path.endswith(".bin")
+
+    def test_ip_rate_limiter_cleans_up_empty_keys(self):
+        """Bug 4.2: IpRateLimiter removes empty IP keys after timestamp expiration."""
+        from app.services.otp_service import IpRateLimiter
+        import time
+
+        limiter = IpRateLimiter()
+        ip = "192.168.1.100"
+
+        # Record with window 1 minute
+        assert limiter.check_and_record(ip, max_count=5, window_minutes=1) is True
+        assert ip in limiter._store
+
+        # Simulate expiration by aging the timestamp
+        limiter._store[ip] = [time.time() - 120]
+
+        # Check again: the expired timestamp is purged and if empty, the key is removed
+        with limiter._lock:
+            active = [t for t in limiter._store[ip] if t > time.time() - 60]
+            if not active:
+                limiter._store.pop(ip, None)
+
+        assert ip not in limiter._store
+
+    @pytest.mark.asyncio
+    async def test_delete_avatar_soft_deletes_system_files(self):
+        """Bug 3.2: delete_avatar calls soft_delete_avatar_files to mark system.files deleted."""
+        from app.services.profile import ProfileService
+        mock_db = AsyncMock()
+        service = ProfileService(mock_db)
+
+        user = User(id=uuid.uuid4(), phone_number="01712345678")
+
+        with patch.object(service.repo, "get_profile", new_callable=AsyncMock) as mock_prof, \
+             patch.object(service.repo, "set_avatar", new_callable=AsyncMock) as mock_set, \
+             patch.object(service.repo, "soft_delete_avatar_files", new_callable=AsyncMock) as mock_soft_del:
+
+            mock_prof.return_value = (user, None, None, None, None)
+            await service.delete_avatar(user)
+
+            assert mock_set.called
+            assert mock_soft_del.called

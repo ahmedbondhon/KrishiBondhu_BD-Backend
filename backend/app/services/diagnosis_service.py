@@ -32,7 +32,8 @@ from app.core.config import settings
 from app.models.advisory import Advisory, AdvisoryFeedback, AdvisoryTemplate
 from app.models.ai import AIModel, AIModelFeedback, AIPrediction, AIPredictionDetail
 from app.models.auth import User
-from app.models.catalog import Issue
+from app.models.catalog import GrowthStage, Issue, Remedy
+from app.models.farm import Plot, PlotCrop
 from app.models.diagnosis import (
     CaseAssignment,
     CaseImage,
@@ -107,7 +108,57 @@ class DiagnosisService:
     async def create_case(
         self, db: AsyncSession, farmer_id: uuid.UUID, payload: CreateDiagnosisCaseRequest
     ) -> DiagnosisCase:
-        """Create a new draft diagnosis case."""
+        """Create a new draft diagnosis case with cross-entity IDOR checks."""
+        # 1. Validate plot_id belongs to the farmer
+        if payload.plot_id:
+            plot_res = await db.execute(
+                select(Plot).where(
+                    Plot.id == payload.plot_id,
+                    Plot.user_id == farmer_id,
+                    Plot.is_deleted == False,
+                )
+            )
+            plot = plot_res.scalar_one_or_none()
+            if not plot:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "PLOT_NOT_FOUND", "message_bn": "নির্দিষ্ট জমিটি পাওয়া যায়নি বা এই জমিটি আপনার নয়।"},
+                )
+
+        # 2. Validate plot_crop_id matches plot and crop
+        if payload.plot_crop_id:
+            plot_crop_res = await db.execute(
+                select(PlotCrop).where(
+                    PlotCrop.id == payload.plot_crop_id,
+                    PlotCrop.is_deleted == False,
+                )
+            )
+            plot_crop = plot_crop_res.scalar_one_or_none()
+            if not plot_crop:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "PLOT_CROP_NOT_FOUND", "message_bn": "ফসলের চক্রটি পাওয়া যায়নি।"},
+                )
+            if (payload.plot_id and plot_crop.plot_id != payload.plot_id) or (plot_crop.crop_id != payload.crop_id):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"code": "INVALID_PLOT_CROP", "message_bn": "ফসলের চক্রটি নির্বাচিত জমি বা ফসলের সাথে মেলে না।"},
+                )
+
+        # 3. Validate growth_stage_id belongs to crop_id
+        if payload.growth_stage_id:
+            stage_res = await db.execute(
+                select(GrowthStage).where(
+                    GrowthStage.id == payload.growth_stage_id,
+                )
+            )
+            stage = stage_res.scalar_one_or_none()
+            if not stage or stage.crop_id != payload.crop_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"code": "INVALID_GROWTH_STAGE", "message_bn": "নির্বাচিত বৃদ্ধির পর্যায়টি এই ফসলের জন্য প্রযোজ্য নয়।"},
+                )
+
         case_num = await _generate_case_number(db)
         case = DiagnosisCase(
             case_number=case_num,
@@ -494,6 +545,32 @@ class DiagnosisService:
         if not template:
             return None  # No template found — case will still be marked diagnosed
 
+        # Query active remedies for this issue from catalog.remedies (Bug 1.2)
+        remedies_res = await db.execute(
+            select(Remedy).where(
+                Remedy.issue_id == issue.id,
+                Remedy.is_active == True,
+            )
+        )
+        remedies = remedies_res.scalars().all()
+
+        chem_recs = []
+        org_recs = []
+        for rem in remedies:
+            desc = rem.title_bn
+            if rem.dosage_bn:
+                desc += f" (মাত্রা: {rem.dosage_bn})"
+            if rem.description_bn and rem.description_bn != rem.title_bn:
+                desc += f" - {rem.description_bn}"
+
+            if rem.type == "chemical":
+                chem_recs.append(desc)
+            elif rem.type in ("organic", "cultural"):
+                org_recs.append(desc)
+
+        chemical_recs_str = "\n".join(chem_recs) if chem_recs else None
+        organic_recs_str = "\n".join(org_recs) if org_recs else None
+
         # Check if an advisory already exists for this case to prevent UniqueViolationError
         existing_adv_result = await db.execute(
             select(Advisory).where(Advisory.case_id == case.id)
@@ -506,6 +583,8 @@ class DiagnosisService:
             existing_advisory.summary_bn = f"{issue.name_bn} - {template.title_bn}"
             existing_advisory.detailed_treatment_bn = template.content_bn
             existing_advisory.preventive_measures_bn = template.preventive_measures_bn
+            existing_advisory.chemical_recommendations_bn = chemical_recs_str
+            existing_advisory.organic_recommendations_bn = organic_recs_str
             existing_advisory.source = "ai_generated"
             existing_advisory.is_published = True
             await db.flush()
@@ -519,6 +598,8 @@ class DiagnosisService:
             summary_bn=f"{issue.name_bn} - {template.title_bn}",
             detailed_treatment_bn=template.content_bn,
             preventive_measures_bn=template.preventive_measures_bn,
+            chemical_recommendations_bn=chemical_recs_str,
+            organic_recommendations_bn=organic_recs_str,
             source="ai_generated",
             is_published=True,
         )

@@ -27,6 +27,7 @@ class CreateDiagnosisCaseRequest(BaseModel):
     growth_stage_id: Optional[UUID] = Field(None, description="Current growth stage of the crop")
     plot_id: Optional[UUID] = Field(None, description="Which plot is affected?")
     plot_crop_id: Optional[UUID] = None
+    farmer_id: Optional[UUID] = Field(None, description="Target farmer ID if created on behalf by agent or admin")
     farmer_notes: Optional[str] = Field(None, max_length=2000, description="Farmer's description of symptoms")
     latitude: Optional[Decimal] = Field(None, ge=-90, le=90)
     longitude: Optional[Decimal] = Field(None, ge=-180, le=180)

@@ -91,6 +91,8 @@ class AuthService:
         # 2. Verify Phone & Consents
         if not await self.otp_service.is_verified(phone, "registration", payload.otp_code, payload.verification_token):
             raise PhoneNotVerifiedError("Phone verification required. Please verify OTP in Step 1.")
+        if getattr(payload, "verification_token", None):
+            self.otp_service.consume_verification_token(payload.verification_token)
         if not payload.terms_accepted:
             raise ConsentRequiredError("You must agree to the Terms of Service to register.")
         if not payload.privacy_accepted:
@@ -377,8 +379,10 @@ class AuthService:
             role_code = user.role.code
         elif user and hasattr(user, "role_code"):
             role_code = user.role_code
-        elif sb_user:
+        elif sb_user and isinstance(sb_user, dict):
             role_code = sb_user.get("role_code") or (sb_user.get("roles") or {}).get("code") or "farmer"
+        elif sb_user and hasattr(sb_user, "role_code"):
+            role_code = sb_user.role_code
 
         try:
             if role_code == "farmer":
@@ -394,6 +398,7 @@ class AuthService:
         if payload.verification_token:
             if not self.otp_service.decode_verification_token(payload.verification_token, phone, "reset_password"):
                 raise AuthenticationError("Invalid or expired reset token.")
+            self.otp_service.consume_verification_token(payload.verification_token)
         elif payload.otp_code:
             await self.otp_service.verify_otp(phone_number=phone, otp_code=payload.otp_code, purpose="reset_password")
         else:

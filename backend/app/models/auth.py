@@ -112,7 +112,7 @@ class ConsentType(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
     auth.consent_types — Defines the types of consent a user can grant.
 
-    Seeded types: account_terms, image_processing, location_data, ai_improvement.
+    Seeded types: terms_of_service, privacy_policy, voice_recording, location_data (also supports account_terms, image_processing, ai_improvement).
     """
     __tablename__ = "consent_types"
     __table_args__ = {"schema": "auth"}

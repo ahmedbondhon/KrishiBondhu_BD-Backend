@@ -61,7 +61,12 @@ async def create_diagnosis_case(
       1. Attach at least one image via POST /diagnosis-cases/{case_id}/images
       2. Trigger analysis via POST /diagnosis-cases/{case_id}/analyze
     """
-    case = await diagnosis_service.create_case(db, current_user.id, payload)
+    target_farmer_id = current_user.id
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if current_user.role else "")
+    if user_role in ("agent", "admin", "administrator", "tech_admin", "technical_admin") and payload.farmer_id:
+        target_farmer_id = payload.farmer_id
+
+    case = await diagnosis_service.create_case(db, target_farmer_id, payload)
     return success_response(
         data={"case_id": str(case.id), "case_number": case.case_number, "status": case.status},
         message="রোগ নির্ণয় কেস তৈরি হয়েছে।",

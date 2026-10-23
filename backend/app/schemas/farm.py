@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ─────────────────────────────────────────────────────────
@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class CreatePlotRequest(BaseModel):
     """POST /api/v1/farms — Create a new farm plot."""
     name: str = Field(..., min_length=1, max_length=100, description="Plot name (e.g., 'উত্তর মাঠ')")
+    farmer_id: Optional[UUID] = Field(None, description="Target farmer ID if created on behalf by agent or admin")
     area_bigha: Optional[Decimal] = Field(None, ge=0, description="Area in traditional bigha unit")
     area_sqm: Optional[Decimal] = Field(None, ge=0, description="Area in square meters")
     soil_type: Optional[str] = Field(None, max_length=50)
@@ -59,6 +60,13 @@ class CreatePlotCropRequest(BaseModel):
     sowing_date: Optional[date] = None
     expected_harvest_date: Optional[date] = None
     notes: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_dates(self) -> "CreatePlotCropRequest":
+        if self.sowing_date and self.expected_harvest_date:
+            if self.expected_harvest_date < self.sowing_date:
+                raise ValueError("সম্ভাব্য ফসল কাটার তারিখ বপনের তারিখের পূর্ববর্তী হতে পারে না।")
+        return self
 
 
 class PlotCropResponse(BaseModel):

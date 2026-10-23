@@ -69,6 +69,23 @@ class ProfileRepository:
         await self.db.execute(stmt)
         await self.db.flush()
 
+    async def soft_delete_avatar_files(self, user_id: uuid.UUID) -> None:
+        """Mark user's avatar records in system.files as deleted (Bug 3.2)."""
+        stmt = (
+            update(File)
+            .where(
+                File.entity_type == "user_avatar",
+                File.entity_id == user_id,
+                File.is_deleted.is_(False),
+            )
+            .values(
+                is_deleted=True,
+                deleted_at=datetime.now(timezone.utc),
+            )
+        )
+        await self.db.execute(stmt)
+        await self.db.flush()
+
     async def record_avatar_file(
         self,
         user_id: uuid.UUID,

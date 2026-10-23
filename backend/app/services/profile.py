@@ -256,6 +256,7 @@ class ProfileService:
                 await supabase_client.delete_storage_file(settings.storage_bucket_name, path)
 
         await self.repo.set_avatar(user.id, None)
+        await self.repo.soft_delete_avatar_files(user.id)
         try:
             await supabase_client.update_user_profile(str(user.id), {"avatar_url": None})
         except Exception:
