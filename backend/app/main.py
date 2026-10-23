@@ -78,6 +78,20 @@ async def lifespan(app: FastAPI):
     yield  # Application is running
 
     logger.info("🛑 KrishiBondhu API shutting down...")
+    try:
+        from app.services.supabase_client import supabase_client
+        await supabase_client.close()
+        logger.info("✅ Supabase client connection pool closed.")
+    except Exception as e:
+        logger.warning(f"⚠️ Supabase client close skipped: {e}")
+
+    try:
+        from app.services.diagnosis_service import diagnosis_service
+        await diagnosis_service.close()
+        logger.info("✅ Diagnosis service HTTP client closed.")
+    except Exception as e:
+        logger.warning(f"⚠️ Diagnosis service close skipped: {e}")
+
     await engine.dispose()
     logger.info("✅ Database connections closed.")
 

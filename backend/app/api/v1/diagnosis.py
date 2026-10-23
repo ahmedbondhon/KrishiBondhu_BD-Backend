@@ -38,11 +38,10 @@ from app.schemas.diagnosis import (
     SubmitExpertReviewRequest,
     SubmitFeedbackRequest,
 )
-from app.services.diagnosis_service import DiagnosisService
+from app.services.diagnosis_service import DiagnosisService, diagnosis_service
 
 router = APIRouter(tags=["Crop Diagnosis (ChashiGuard)"])
 expert_router = APIRouter(prefix="/expert", tags=["Expert Review Workflow"])
-diagnosis_service = DiagnosisService()
 
 
 # ─────────────────────────────────────────────────────────
@@ -161,6 +160,8 @@ async def get_case(
             "summary_bn": case.advisory.summary_bn,
             "detailed_treatment_bn": case.advisory.detailed_treatment_bn,
             "preventive_measures_bn": case.advisory.preventive_measures_bn,
+            "chemical_recommendations_bn": case.advisory.chemical_recommendations_bn,
+            "organic_recommendations_bn": case.advisory.organic_recommendations_bn,
             "source": case.advisory.source,
         }
 
@@ -186,7 +187,7 @@ async def get_case(
             "case_status": case.status,
             "urgency_level": case.urgency_level,
             "farmer_notes": case.farmer_notes,
-            "requires_expert_review": case.status in ("escalated", "submitted"),
+            "requires_expert_review": case.status == "escalated" or (latest_prediction is not None and not latest_prediction.is_confident),
             "confidence_score": float(latest_prediction.confidence_score) if latest_prediction else None,
             "advisory": advisory_data,
             "expert_reviews": expert_reviews_data,

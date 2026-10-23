@@ -70,6 +70,10 @@ def require_roles(*allowed_roles: str):
         expanded.add("admin")
     if "admin" in expanded:
         expanded.add("administrator")
+    if "technical_admin" in expanded:
+        expanded.add("tech_admin")
+    if "tech_admin" in expanded:
+        expanded.add("technical_admin")
 
     async def role_checker(current_user: CurrentUser) -> User:
         if current_user.role_code not in expanded:

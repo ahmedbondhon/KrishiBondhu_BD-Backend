@@ -143,7 +143,7 @@ async def confirm_upload(
         )
 
     # Verify file actually exists in storage before saving to DB
-    if not storage_service.check_file_exists(payload.storage_path):
+    if not await storage_service.check_file_exists(payload.storage_path):
         return error_response(
             message="Uploaded file not found in storage",
             error_code="FILE_NOT_FOUND_IN_STORAGE",
@@ -195,8 +195,8 @@ async def get_view_url(
     if not file:
         return error_response("File not found", "FILE_NOT_FOUND", 404)
 
-    # Access control: only uploader or admin
-    if file.uploaded_by != current_user.id and current_user.role.code not in ("admin", "tech_admin"):
+    # Access control: only uploader or admin/tech_admin
+    if file.uploaded_by != current_user.id and current_user.role_code not in ("admin", "administrator", "tech_admin", "technical_admin"):
         return error_response("Access denied", "FORBIDDEN", 403)
 
     view_url = storage_service.generate_view_url(file.storage_path)

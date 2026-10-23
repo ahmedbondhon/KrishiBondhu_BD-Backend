@@ -97,12 +97,20 @@ def require_roles(*allowed_role_codes: str):
 
     Returns a FastAPI dependency function that raises 403 Forbidden if the
     authenticated user's role is not in the allowed set.
-
-    Example:
-        @router.get("/admin-only", dependencies=[Depends(require_roles("admin", "tech_admin"))])
     """
+    expanded = set(allowed_role_codes)
+    if "administrator" in expanded:
+        expanded.add("admin")
+    if "admin" in expanded:
+        expanded.add("administrator")
+    if "technical_admin" in expanded:
+        expanded.add("tech_admin")
+    if "tech_admin" in expanded:
+        expanded.add("technical_admin")
+
     async def _check_role(current_user: User = Depends(get_current_user)) -> User:
-        if current_user.role.code not in allowed_role_codes:
+        user_role = current_user.role_code if hasattr(current_user, "role_code") else (current_user.role.code if current_user.role else "farmer")
+        if user_role not in expanded:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail={

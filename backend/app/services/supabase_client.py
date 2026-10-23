@@ -27,24 +27,37 @@ class SupabaseClient:
             "Content-Type": "application/json",
             "Prefer": "return=representation",
         }
+        self._client: httpx.AsyncClient | None = None
+
+    def get_client(self) -> httpx.AsyncClient:
+        """Reuse a single shared httpx.AsyncClient to eliminate TCP/TLS overhead."""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=10.0)
+        return self._client
+
+    async def close(self) -> None:
+        """Close shared connection pool on app shutdown."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     async def _request(self, method: str, endpoint: str, **kwargs) -> Any:
         """Centralized HTTP request handler to eliminate try/except boilerplate."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                m = method.lower()
-                url = f"{self.base_url}/{endpoint}"
-                headers = kwargs.pop("headers", self.headers)
-                if hasattr(client, m):
-                    fn = getattr(client, m)
-                    resp = await fn(url, headers=headers, **kwargs)
-                else:
-                    resp = await client.request(method, url, headers=headers, **kwargs)
-                if resp.status_code in (200, 201):
-                    return resp.json()
-                if resp.status_code == 204:
-                    return True
-                logger.warning(f"Supabase {method} /{endpoint} failed: {resp.status_code} - {resp.text}")
+            client = self.get_client()
+            m = method.lower()
+            url = f"{self.base_url}/{endpoint}"
+            headers = kwargs.pop("headers", self.headers)
+            if hasattr(client, m):
+                fn = getattr(client, m)
+                resp = await fn(url, headers=headers, **kwargs)
+            else:
+                resp = await client.request(method, url, headers=headers, **kwargs)
+            if resp.status_code in (200, 201):
+                return resp.json()
+            if resp.status_code == 204:
+                return True
+            logger.warning(f"Supabase {method} /{endpoint} failed: {resp.status_code} - {resp.text}")
         except Exception as e:
             logger.error(f"Supabase error on {method} /{endpoint}: {e}")
         return None
@@ -109,17 +122,17 @@ class SupabaseClient:
     async def update_user_email_verified(self, user_id: str, verified: bool = True) -> bool:
         return bool(await self._request("PATCH", f"users?id=eq.{user_id}", json={"email_verified": verified}))
 
-    async def record_otp(self, phone: str, otp_code: str, expires_at: datetime) -> bool:
+    async def record_otp(self, phone: str, otp_hash: str, expires_at: datetime) -> bool:
         return bool(await self._request("POST", "otp_logs", json={
             "phone_number": normalize_bd_phone(phone),
-            "otp_code": otp_code,
+            "otp_hash": otp_hash,
             "expires_at": expires_at.isoformat(),
             "is_verified": False,
         }))
 
-    async def mark_otp_verified(self, phone: str, otp_code: str) -> bool:
+    async def mark_otp_verified(self, phone: str, otp_hash: str) -> bool:
         phone = normalize_bd_phone(phone)
-        return bool(await self._request("PATCH", f"otp_logs?phone_number=eq.{phone}&otp_code=eq.{otp_code}", json={"is_verified": True}))
+        return bool(await self._request("PATCH", f"otp_logs?phone_number=eq.{phone}&otp_hash=eq.{otp_hash}", json={"is_verified": True}))
 
     async def record_user_consent(self, user_id: str, code: str, ip: str | None, ua: str | None, is_granted: bool = True) -> None:
         ct = await self._request("GET", f"consent_types?code=eq.{code}")
@@ -140,11 +153,11 @@ class SupabaseClient:
             "x-upsert": "true",
         }
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(url, headers=headers, content=content)
-                if resp.status_code in (200, 201):
-                    return f"{settings.supabase_url.rstrip('/')}/storage/v1/object/public/{bucket}/{path.lstrip('/')}"
-                logger.error(f"Supabase storage upload failed: {resp.status_code} - {resp.text}")
+            client = self.get_client()
+            resp = await client.post(url, headers=headers, content=content)
+            if resp.status_code in (200, 201):
+                return f"{settings.supabase_url.rstrip('/')}/storage/v1/object/public/{bucket}/{path.lstrip('/')}"
+            logger.error(f"Supabase storage upload failed: {resp.status_code} - {resp.text}")
         except Exception as e:
             logger.error(f"Supabase storage upload error: {e}")
         return None
@@ -159,28 +172,12 @@ class SupabaseClient:
             "Content-Type": "application/json",
         }
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.request("DELETE", url, headers=headers, json={"prefixes": [path.lstrip("/")]})
-                return resp.status_code in (200, 204)
+            client = self.get_client()
+            resp = await client.request("DELETE", url, headers=headers, json={"prefixes": [path.lstrip("/")]})
+            return resp.status_code in (200, 204)
         except Exception as e:
             logger.error(f"Supabase storage delete error: {e}")
         return False
-
-    async def get_inspector_data(self) -> dict[str, list]:
-        users_raw = await self._request("GET", "users?select=*,roles(name,code)&order=created_at.desc&limit=15") or []
-        users = [{
-            **{k: u.get(k) for k in ("id", "phone_number", "full_name", "email", "division_id", "district_id", "upazila_id", "union_id", "created_at")},
-            "role": (u.get("roles") or {}).get("code", "farmer"),
-            "status": u.get("status", "active"),
-        } for u in users_raw]
-
-        return {
-            "users": users,
-            "login_attempts": await self._request("GET", "login_attempts?order=attempted_at.desc&limit=10") or [],
-            "roles": await self._request("GET", "roles?order=code.asc") or [],
-            "consent_types": await self._request("GET", "consent_types?order=code.asc") or [],
-            "otp_logs": await self._request("GET", "otp_logs?order=created_at.desc&limit=10") or [],
-        }
 
 
 supabase_client = SupabaseClient()

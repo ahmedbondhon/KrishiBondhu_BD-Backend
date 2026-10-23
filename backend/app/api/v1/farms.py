@@ -148,7 +148,7 @@ async def list_crop_cycles(
             detail={"code": "PLOT_NOT_FOUND", "message_bn": "জমিটি পাওয়া যায়নি।"},
         )
 
-    if current_user.role.code not in ("admin", "tech_admin") and plot.user_id != current_user.id:
+    if current_user.role_code not in ("admin", "administrator", "tech_admin", "technical_admin") and plot.user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "FORBIDDEN", "message_bn": "আপনার এই জমির তথ্য দেখার অনুমতি নেই।"},

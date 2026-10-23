@@ -213,11 +213,15 @@ class ProfileService:
                     "ছবি ক্লাউড স্টোরেজে আপলোড করতে সমস্যা হয়েছে / Failed to upload image to Supabase storage."
                 )
         else:
-            # Fallback to local storage
-            avatars_dir = Path(settings.upload_dir) / "avatars"
-            avatars_dir.mkdir(parents=True, exist_ok=True)
-            file_path = avatars_dir / filename
-            file_path.write_bytes(content)
+            # Fallback to local storage (written off-thread to prevent event loop blocking)
+            def _write_local():
+                avatars_dir = Path(settings.upload_dir) / "avatars"
+                avatars_dir.mkdir(parents=True, exist_ok=True)
+                file_path = avatars_dir / filename
+                file_path.write_bytes(content)
+
+            import asyncio
+            await asyncio.to_thread(_write_local)
             public_url = f"{settings.public_base_url.rstrip('/')}/static/avatars/{filename}"
 
         # 1. Update avatar_url in local auth.users

@@ -23,6 +23,25 @@ from app.services.supabase_client import supabase_client
 logger = logging.getLogger("krishibondhu.otp")
 settings = get_settings()
 
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _safe_create_task(coro) -> asyncio.Task:
+    """Retain strong reference to prevent premature garbage collection and unhandled task warnings."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+
+    def _done_callback(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        try:
+            if not t.cancelled() and t.exception():
+                logger.warning(f"Background task exception: {t.exception()}")
+        except Exception:
+            pass
+
+    task.add_done_callback(_done_callback)
+    return task
+
 
 class SmsSimulatorInbox:
     """Thread-safe in-memory store for SMS simulator messages."""
@@ -123,7 +142,7 @@ class OtpService:
 
         await self.repo.create_otp(phone_number=phone, otp_hash=otp_hash, purpose=purpose, expires_at=expires_at)
         self._dispatch_sms(phone, otp_code, purpose)
-        asyncio.create_task(supabase_client.record_otp(phone, otp_hash, expires_at))
+        _safe_create_task(supabase_client.record_otp(phone, otp_hash, expires_at))
 
         res = {
             "message": f"OTP sent to {phone_number} successfully.",
@@ -161,7 +180,7 @@ class OtpService:
             raise InvalidOtpError(f"Incorrect OTP code. {rem} attempt(s) remaining.")
 
         await self.repo.mark_otp_verified(record.id)
-        asyncio.create_task(supabase_client.mark_otp_verified(phone, record.otp_hash))
+        _safe_create_task(supabase_client.mark_otp_verified(phone, record.otp_hash))
 
         return {
             "message": "OTP verified successfully.",

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 import uuid
 
+from fastapi import HTTPException, status
 from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,6 +49,8 @@ from app.schemas.auth import (
     SupportContactResponse,
     TokenResponse,
     UserResponse,
+    validate_farmer_pin,
+    validate_strong_password,
 )
 from app.services.otp_service import OtpService
 from app.services.supabase_client import supabase_client
@@ -368,6 +371,26 @@ class AuthService:
         if not sb_user and not user:
             raise UserNotFoundError("phone number")
 
+        # Determine user role and validate password policy
+        role_code = "farmer"
+        if user and user.role:
+            role_code = user.role.code
+        elif user and hasattr(user, "role_code"):
+            role_code = user.role_code
+        elif sb_user:
+            role_code = sb_user.get("role_code") or (sb_user.get("roles") or {}).get("code") or "farmer"
+
+        try:
+            if role_code == "farmer":
+                validate_farmer_pin(payload.new_password)
+            else:
+                validate_strong_password(payload.new_password, role_code.capitalize())
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e),
+            )
+
         if payload.verification_token:
             if not self.otp_service.decode_verification_token(payload.verification_token, phone, "reset_password"):
                 raise AuthenticationError("Invalid or expired reset token.")
@@ -556,3 +579,6 @@ def _user_to_response(user: User) -> UserResponse:
         last_login_at=user.last_login_at,
         created_at=user.created_at,
     )
+
+
+ExtendedAuthService = AuthService

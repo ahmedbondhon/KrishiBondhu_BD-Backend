@@ -31,6 +31,7 @@ from sqlalchemy.orm import selectinload
 from app.core.config import settings
 from app.models.advisory import Advisory, AdvisoryFeedback, AdvisoryTemplate
 from app.models.ai import AIModel, AIModelFeedback, AIPrediction, AIPredictionDetail
+from app.models.auth import User
 from app.models.catalog import Issue
 from app.models.diagnosis import (
     CaseAssignment,
@@ -86,6 +87,20 @@ async def _generate_case_number(db: AsyncSession) -> str:
 
 class DiagnosisService:
     """Orchestrates the full ChashiGuard crop diagnosis workflow."""
+
+    def __init__(self):
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+    def _get_client(self, timeout: float = 15.0) -> httpx.AsyncClient:
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=timeout)
+        return self._http_client
+
+    async def close(self) -> None:
+        """Close shared HTTP client on shutdown."""
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
 
     # ── Case Management ───────────────────────────────────────────
 
@@ -228,96 +243,140 @@ class DiagnosisService:
         await self._update_status(db, case, "processing", changed_by=farmer_id, notes="AI analysis triggered")
         await db.commit()
 
-        # Call AI service (executed with NO active DB transaction)
-        ai_result = await self._call_ai_service(
-            case_id=case.id,
-            crop_id=case.crop_id,
-            storage_path=image_file.storage_path,
-        )
-
-        # Resolve primary issue from AI result
-        issue = None
-        if ai_result.get("primary_issue_code"):
-            issue_result = await db.execute(
-                select(Issue).where(Issue.code == ai_result["primary_issue_code"])
+        try:
+            # Call AI service (executed with NO active DB transaction)
+            ai_result = await self._call_ai_service(
+                case_id=case.id,
+                crop_id=case.crop_id,
+                storage_path=image_file.storage_path,
             )
-            issue = issue_result.scalar_one_or_none()
 
-        confidence_score = float(ai_result.get("confidence_score", 0.0))
-        is_confident = confidence_score >= settings.ai_confidence_threshold
+            # Resolve primary issue from AI result
+            issue = None
+            if ai_result.get("primary_issue_code"):
+                issue_result = await db.execute(
+                    select(Issue).where(Issue.code == ai_result["primary_issue_code"])
+                )
+                issue = issue_result.scalar_one_or_none()
 
-        # Save AI prediction (IMMUTABLE — never update this record)
-        prediction = AIPrediction(
-            case_id=case.id,
-            model_id=ai_model.id,
-            file_id=case.primary_image_id,
-            primary_issue_id=issue.id if issue else None,
-            confidence_score=confidence_score,
-            is_confident=is_confident,
-            raw_response=ai_result,
-            processing_time_ms=ai_result.get("processing_time_ms"),
-            status="completed",
-            created_at=datetime.now(timezone.utc),
-        )
-        db.add(prediction)
-        await db.flush()
+            confidence_score = float(ai_result.get("confidence_score", 0.0))
+            is_confident = confidence_score >= settings.ai_confidence_threshold
 
-        # Save top-N prediction details
-        for rank_data in ai_result.get("top_predictions", []):
-            detail = AIPredictionDetail(
-                prediction_id=prediction.id,
-                class_label=rank_data["class_label"],
-                rank_order=rank_data["rank"],
-                confidence_score=rank_data["confidence_score"],
+            # Save AI prediction (IMMUTABLE — never update this record)
+            prediction = AIPrediction(
+                case_id=case.id,
+                model_id=ai_model.id,
+                file_id=case.primary_image_id,
+                primary_issue_id=issue.id if issue else None,
+                confidence_score=confidence_score,
+                is_confident=is_confident,
+                raw_response=ai_result,
+                processing_time_ms=ai_result.get("processing_time_ms"),
+                status="completed",
                 created_at=datetime.now(timezone.utc),
             )
-            db.add(detail)
+            db.add(prediction)
+            await db.flush()
 
-        # Apply confidence threshold logic
-        advisory_payload = None
-        if is_confident and issue:
-            # Generate advisory from template
-            advisory = await self._generate_advisory(
-                db=db,
-                case=case,
-                prediction=prediction,
-                issue=issue,
-                growth_stage_id=case.growth_stage_id,
-            )
-            await self._update_status(db, case, "ai_analyzed", notes="High/medium confidence — advisory generated")
-            case.urgency_level = ai_result.get("urgency_level", "medium")
+            # Resolve issue_ids for top_predictions (Bug 3.1)
+            top_labels = [r.get("class_label") or r.get("class") for r in ai_result.get("top_predictions", []) if (r.get("class_label") or r.get("class"))]
+            issue_map = {}
+            if top_labels:
+                issues_res = await db.execute(
+                    select(Issue).where(Issue.code.in_(top_labels))
+                )
+                for iss in issues_res.scalars().all():
+                    issue_map[iss.code] = iss.id
 
-            if advisory:
-                advisory_payload = {
-                    "title_bn": advisory.title_bn,
-                    "summary_bn": advisory.summary_bn,
-                    "detailed_treatment_bn": advisory.detailed_treatment_bn,
-                    "preventive_measures_bn": advisory.preventive_measures_bn,
-                    "chemical_recommendations_bn": advisory.chemical_recommendations_bn,
-                    "organic_recommendations_bn": advisory.organic_recommendations_bn,
-                    "source": advisory.source,
+            # Save top-N prediction details with matched issue_id
+            for idx, rank_data in enumerate(ai_result.get("top_predictions", [])):
+                label = rank_data.get("class_label") or rank_data.get("class")
+                matched_id = issue_map.get(label)
+                rank = rank_data.get("rank") or rank_data.get("rank_order") or (idx + 1)
+                conf = rank_data.get("confidence_score") or rank_data.get("confidence") or 0.0
+                detail = AIPredictionDetail(
+                    prediction_id=prediction.id,
+                    issue_id=matched_id,
+                    class_label=label,
+                    rank_order=rank,
+                    confidence_score=conf,
+                    created_at=datetime.now(timezone.utc),
+                )
+                db.add(detail)
+
+            # Apply confidence threshold logic
+            advisory_payload = None
+            if is_confident and issue:
+                # Generate advisory from template
+                advisory = await self._generate_advisory(
+                    db=db,
+                    case=case,
+                    prediction=prediction,
+                    issue=issue,
+                    growth_stage_id=case.growth_stage_id,
+                )
+                await self._update_status(db, case, "ai_analyzed", notes="High/medium confidence — advisory generated")
+                case.urgency_level = ai_result.get("urgency_level", "medium")
+
+                if advisory:
+                    advisory_payload = {
+                        "title_bn": advisory.title_bn,
+                        "summary_bn": advisory.summary_bn,
+                        "detailed_treatment_bn": advisory.detailed_treatment_bn,
+                        "preventive_measures_bn": advisory.preventive_measures_bn,
+                        "chemical_recommendations_bn": advisory.chemical_recommendations_bn,
+                        "organic_recommendations_bn": advisory.organic_recommendations_bn,
+                        "source": advisory.source,
+                    }
+            else:
+                # Low confidence → escalate to expert
+                await self._update_status(
+                    db, case, "escalated",
+                    notes="Low confidence — escalated to expert review queue"
+                )
+                case.urgency_level = "high"  # Conservative: treat unknown as urgent
+
+            # Build top predictions list for response
+            top_preds = [
+                {
+                    "rank": r.get("rank") or r.get("rank_order") or (i + 1),
+                    "class_label": r.get("class_label") or r.get("class"),
+                    "confidence_score": r.get("confidence_score") or r.get("confidence") or 0.0,
+                    "issue_id": str(issue_map.get(r.get("class_label") or r.get("class"))) if issue_map.get(r.get("class_label") or r.get("class")) else None,
                 }
-        else:
-            # Low confidence → escalate to expert
-            await self._update_status(
-                db, case, "escalated",
-                notes="Low confidence — escalated to expert review queue"
-            )
-            case.urgency_level = "high"  # Conservative: treat unknown as urgent
+                for i, r in enumerate(ai_result.get("top_predictions", []))
+            ]
 
-        # Build top predictions list for response
-        top_preds = [
-            {
-                "rank": r.get("rank"),
-                "class_label": r.get("class_label"),
-                "confidence_score": r.get("confidence_score"),
-                "issue_id": None,
-            }
-            for r in ai_result.get("top_predictions", [])
-        ]
-
-        # Explicitly commit all analysis results, predictions, and advisories to the DB
-        await db.commit()
+            # Explicitly commit all analysis results, predictions, and advisories to the DB
+            await db.commit()
+        except HTTPException:
+            await db.rollback()
+            try:
+                await self._update_status(
+                    db, case, "submitted",
+                    changed_by=farmer_id,
+                    notes="AI analysis failed or rolled back"
+                )
+                await db.commit()
+            except Exception:
+                pass
+            raise
+        except Exception as e:
+            # Bug 1.1: Reset case status to submitted so it does not get stuck in processing
+            await db.rollback()
+            try:
+                await self._update_status(
+                    db, case, "submitted",
+                    changed_by=farmer_id,
+                    notes=f"AI analysis failed or rolled back: {str(e)}"
+                )
+                await db.commit()
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"code": "AI_ANALYSIS_FAILED", "message_bn": "AI বিশ্লেষণ ব্যর্থ হয়েছে। অনুগ্রহ করে কিছুক্ষণ পর আবার চেষ্টা করুন।"}
+            ) from e
 
         return DiagnosisResponse(
             case_id=case.id,
@@ -359,30 +418,30 @@ class DiagnosisService:
             else:
                 signed_url = storage_service.generate_view_url(storage_path)
 
-            async with httpx.AsyncClient(timeout=5.0) as fetch_client:
-                img_response = await fetch_client.get(signed_url)
-                if img_response.status_code == 200:
-                    image_base64 = base64.b64encode(img_response.content).decode("utf-8")
-                    content_type = img_response.headers.get("content-type", "image/jpeg")
-                    image_mime_type = content_type.split(";")[0].strip()
+            fetch_client = self._get_client(timeout=5.0)
+            img_response = await fetch_client.get(signed_url)
+            if img_response.status_code == 200:
+                image_base64 = base64.b64encode(img_response.content).decode("utf-8")
+                content_type = img_response.headers.get("content-type", "image/jpeg")
+                image_mime_type = content_type.split(";")[0].strip()
         except Exception:
             pass  # No image bytes — AI service will use mock fallback
 
-        # Step 2: Call AI service with image data (timeout reduced to 15s to prevent DB pool exhaustion)
+        # Step 2: Call AI service with image data (timeout 15s)
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(
-                    f"{settings.ai_service_url}/internal/v1/crop-diagnosis/predict",
-                    json={
-                        "case_id": str(case_id),
-                        "crop_id": str(crop_id) if crop_id else None,
-                        "storage_path": storage_path,
-                        "image_base64": image_base64,
-                        "image_mime_type": image_mime_type,
-                    },
-                )
-                response.raise_for_status()
-                return response.json()
+            client = self._get_client(timeout=15.0)
+            response = await client.post(
+                f"{settings.ai_service_url}/internal/v1/crop-diagnosis/predict",
+                json={
+                    "case_id": str(case_id),
+                    "crop_id": str(crop_id) if crop_id else None,
+                    "storage_path": storage_path,
+                    "image_base64": image_base64,
+                    "image_mime_type": image_mime_type,
+                },
+            )
+            response.raise_for_status()
+            return response.json()
         except httpx.HTTPError:
             # Return a low-confidence fallback if AI service is unreachable
             return {
@@ -493,6 +552,27 @@ class DiagnosisService:
         if not case:
             raise HTTPException(status_code=404, detail={"code": "CASE_NOT_FOUND"})
 
+        if case.status in ("closed", "expert_reviewed"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "CASE_ALREADY_REVIEWED", "message_bn": "এই কেসটি ইতিমধ্যে পর্যালোচনা বা সমাপ্ত করা হয়েছে।"},
+            )
+
+        if case.assigned_expert_id and case.assigned_expert_id != expert_user_id:
+            user_res = await db.execute(
+                select(User).options(selectinload(User.role)).where(User.id == expert_user_id)
+            )
+            u = user_res.scalar_one_or_none()
+            role = u.role_code if u and hasattr(u, "role_code") else (u.role.code if u and u.role else "")
+            if role not in ("admin", "administrator", "tech_admin", "technical_admin"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"code": "FORBIDDEN", "message_bn": "এই কেসটি অন্য একজন বিশেষজ্ঞের দায়িত্বে রয়েছে।"},
+                )
+
+        if not case.assigned_expert_id:
+            case.assigned_expert_id = expert_user_id
+
         review = ExpertReview(
             case_id=case.id,
             expert_id=expert_user_id,
@@ -530,6 +610,29 @@ class DiagnosisService:
             changed_by=expert_user_id,
             notes="Expert review submitted",
         )
+
+        # Update case_mgmt.case_assignments table (Bug 1.2)
+        now_utc = datetime.now(timezone.utc)
+        assign_result = await db.execute(
+            select(CaseAssignment).where(
+                CaseAssignment.case_id == case.id,
+                CaseAssignment.expert_id == expert_user_id,
+            )
+        )
+        assignments = assign_result.scalars().all()
+        for assignment in assignments:
+            assignment.status = "completed"
+            assignment.responded_at = now_utc
+
+        if not assignments:
+            db.add(CaseAssignment(
+                case_id=case.id,
+                expert_id=expert_user_id,
+                assigned_by=expert_user_id,
+                status="completed",
+                assigned_at=now_utc,
+                responded_at=now_utc,
+            ))
 
         # Write audit log
         db.add(AuditLog(
@@ -754,3 +857,6 @@ class DiagnosisService:
         )
         db.add(history)
         case.status = new_status
+
+
+diagnosis_service = DiagnosisService()
