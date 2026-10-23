@@ -64,8 +64,8 @@ class ConfirmUploadRequest(BaseModel):
     """
     storage_path: str = Field(..., description="Path returned from /upload-url step")
     original_name: str = Field(..., max_length=255)
-    mime_type: str = Field(..., max_length=100)
-    file_size_bytes: int = Field(..., gt=0)
+    mime_type: Literal["image/jpeg", "image/png", "image/webp"] = Field(..., description="Allowed image MIME types")
+    file_size_bytes: int = Field(..., gt=0, le=5_242_880, description="File size in bytes (max 5MB)")
     entity_type: Optional[str] = Field(None, max_length=50)
     entity_id: Optional[UUID] = None
 

@@ -15,7 +15,7 @@ Only the plot owner can access their own plots (enforced in service layer).
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -134,6 +134,26 @@ async def list_crop_cycles(
     db: AsyncSession = Depends(get_db),
 ):
     """List all active and past crop cycles for a specific plot."""
+    # Verify plot ownership / access
+    plot_result = await db.execute(
+        select(Plot).where(
+            Plot.id == plot_id,
+            Plot.is_deleted == False,
+        )
+    )
+    plot = plot_result.scalar_one_or_none()
+    if not plot:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "PLOT_NOT_FOUND", "message_bn": "জমিটি পাওয়া যায়নি।"},
+        )
+
+    if current_user.role.code not in ("admin", "tech_admin") and plot.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "FORBIDDEN", "message_bn": "আপনার এই জমির তথ্য দেখার অনুমতি নেই।"},
+        )
+
     result = await db.execute(
         select(PlotCrop).where(
             PlotCrop.plot_id == plot_id,

@@ -66,10 +66,10 @@ class DiagnosisCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Relationships
     images: Mapped[List["CaseImage"]] = relationship("CaseImage", back_populates="case")
-    status_history: Mapped[List["CaseStatusHistory"]] = relationship("CaseStatusHistory", back_populates="case")
-    predictions: Mapped[List["AIPrediction"]] = relationship("AIPrediction", back_populates="case")
+    status_history: Mapped[List["CaseStatusHistory"]] = relationship("CaseStatusHistory", back_populates="case", order_by="CaseStatusHistory.created_at")
+    predictions: Mapped[List["AIPrediction"]] = relationship("AIPrediction", back_populates="case", order_by="AIPrediction.created_at")
     advisory: Mapped[Optional["Advisory"]] = relationship("Advisory", back_populates="case", uselist=False)
-    expert_reviews: Mapped[List["ExpertReview"]] = relationship("ExpertReview", back_populates="case")
+    expert_reviews: Mapped[List["ExpertReview"]] = relationship("ExpertReview", back_populates="case", order_by="ExpertReview.reviewed_at")
 
 
 class CaseImage(Base, UUIDPrimaryKeyMixin):

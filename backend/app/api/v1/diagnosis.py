@@ -20,7 +20,7 @@ Routes (Expert-facing):
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -141,8 +141,17 @@ async def get_case(
     )
     case = result.scalar_one_or_none()
     if not case:
-        from fastapi import HTTPException
-        raise HTTPException(404, detail={"code": "CASE_NOT_FOUND"})
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "CASE_NOT_FOUND", "message_bn": "কেসটি পাওয়া যায়নি।"},
+        )
+
+    # Ownership check: Farmers and agents may only access their own cases
+    if current_user.role.code in ("farmer", "agent") and case.farmer_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "FORBIDDEN", "message_bn": "আপনার এই কেসের তথ্য দেখার অনুমতি নেই।"},
+        )
 
     # Build response
     advisory_data = None
@@ -155,7 +164,20 @@ async def get_case(
             "source": case.advisory.source,
         }
 
-    latest_prediction = case.predictions[-1] if case.predictions else None
+    latest_prediction = max(case.predictions, key=lambda p: p.created_at) if case.predictions else None
+
+    expert_reviews_data = [
+        {
+            "id": str(r.id),
+            "expert_id": str(r.expert_id),
+            "agreed_with_ai": r.agreed_with_ai,
+            "verified_issue_id": str(r.verified_issue_id) if r.verified_issue_id else None,
+            "diagnosis_notes_bn": r.diagnosis_notes_bn,
+            "prescribed_treatment_bn": r.prescribed_treatment_bn,
+            "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else None,
+        }
+        for r in case.expert_reviews
+    ]
 
     return success_response(
         data={
@@ -167,6 +189,7 @@ async def get_case(
             "requires_expert_review": case.status in ("escalated", "submitted"),
             "confidence_score": float(latest_prediction.confidence_score) if latest_prediction else None,
             "advisory": advisory_data,
+            "expert_reviews": expert_reviews_data,
             "expert_reviews_count": len(case.expert_reviews),
             "created_at": case.created_at.isoformat() if case.created_at else None,
         },
@@ -217,31 +240,9 @@ async def request_expert_review(
 ):
     """
     Farmer explicitly requests expert review (e.g., wants a second opinion).
-    A CaseAssignment record is created and the case is escalated.
+    A CaseAssignment record is created, status history logged, and the case is escalated.
     """
-    result = await db.execute(
-        select(DiagnosisCase).where(
-            DiagnosisCase.id == case_id,
-            DiagnosisCase.farmer_id == current_user.id,
-        )
-    )
-    case = result.scalar_one_or_none()
-    if not case:
-        from fastapi import HTTPException
-        raise HTTPException(404, detail={"code": "CASE_NOT_FOUND"})
-
-    if case.status not in ("submitted", "ai_analyzed"):
-        from fastapi import HTTPException
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "INVALID_CASE_STATUS",
-                "message_bn": "শুধুমাত্র বিশ্লেষণ করা কেস বিশেষজ্ঞ পর্যালোচনার জন্য অনুরোধ করা যাবে।",
-            },
-        )
-
-    case.status = "escalated"
-    await db.flush()  # Persist status change within the transaction
+    case = await diagnosis_service.request_expert_review(db, case_id, current_user.id)
 
     return success_response(
         data={"case_id": str(case.id), "status": case.status},
@@ -288,7 +289,7 @@ async def get_expert_cases(
     result = await db.execute(
         select(DiagnosisCase)
         .where(
-            DiagnosisCase.status.in_(["escalated", "submitted"]),
+            DiagnosisCase.status == "escalated",
             DiagnosisCase.is_deleted == False,
         )
         .order_by(

@@ -18,10 +18,11 @@ In a production system these would also be pushed via SMS (Twilio/BulkSMS)
 or Firebase Cloud Messaging for mobile push — that is out of scope for MVP.
 """
 
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_current_user, get_db
@@ -63,13 +64,12 @@ async def list_notifications(
     notifications = result.scalars().all()
 
     # Count total unread
-    unread_result = await db.execute(
-        select(Notification).where(
+    unread_count = await db.scalar(
+        select(func.count()).select_from(Notification).where(
             Notification.user_id == current_user.id,
             Notification.is_read == False,
         )
-    )
-    unread_count = len(unread_result.scalars().all())
+    ) or 0
 
     return success_response(
         data={
@@ -80,6 +80,7 @@ async def list_notifications(
                     "title_bn": n.title_bn,
                     "body_bn": n.body_bn,
                     "is_read": n.is_read,
+                    "read_at": n.read_at.isoformat() if n.read_at else None,
                     "entity_type": n.entity_type,
                     "entity_id": str(n.entity_id) if n.entity_id else None,
                     "created_at": n.created_at.isoformat() if n.created_at else None,
@@ -112,11 +113,17 @@ async def mark_notification_read(
             detail={"code": "NOTIFICATION_NOT_FOUND", "message_bn": "বিজ্ঞপ্তিটি পাওয়া যায়নি।"},
         )
 
+    now = datetime.now(timezone.utc)
     notification.is_read = True
+    notification.read_at = now
     await db.flush()
 
     return success_response(
-        data={"notification_id": str(notification.id), "is_read": True},
+        data={
+            "notification_id": str(notification.id),
+            "is_read": True,
+            "read_at": now.isoformat(),
+        },
         message="বিজ্ঞপ্তি পঠিত হিসেবে চিহ্নিত হয়েছে।",
     )
 
@@ -127,17 +134,18 @@ async def mark_all_read(
     db: AsyncSession = Depends(get_db),
 ):
     """Mark all of the current user's unread notifications as read at once."""
+    now = datetime.now(timezone.utc)
     await db.execute(
         update(Notification)
         .where(
             Notification.user_id == current_user.id,
             Notification.is_read == False,
         )
-        .values(is_read=True)
+        .values(is_read=True, read_at=now)
     )
     await db.flush()
 
     return success_response(
-        data={"marked_read": True},
+        data={"marked_read": True, "read_at": now.isoformat()},
         message="সব বিজ্ঞপ্তি পঠিত হিসেবে চিহ্নিত হয়েছে।",
     )

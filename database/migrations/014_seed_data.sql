@@ -12,7 +12,8 @@ VALUES
     ('farmer', 'Farmer', 'Smallholder farmer accessing ChashiGuard diagnosis and advisories'),
     ('expert', 'Agricultural Expert', 'DAE/BARI agricultural extension officer providing expert reviews'),
     ('agent', 'Call Center Agent', 'Assisted channel call center operator'),
-    ('admin', 'System Administrator', 'Platform and system administrator')
+    ('admin', 'System Administrator', 'Platform and system administrator'),
+    ('tech_admin', 'Technical Administrator', 'Technical and platform infrastructure administrator')
 ON CONFLICT (code) DO UPDATE SET 
     name = EXCLUDED.name,
     description = EXCLUDED.description;
@@ -154,7 +155,8 @@ ON CONFLICT DO NOTHING;
 -- 9. Seed AI Model Registry (ai.models)
 INSERT INTO ai.models (model_code, name, version, framework, task_type, accuracy_score, f1_score, is_active)
 VALUES 
-    ('chashiguard-cv-v1', 'ChashiGuard Disease Vision Classifier', '1.0.0', 'PyTorch', 'image_classification', 0.9250, 0.9180, TRUE)
+    ('krishibondhu-crop-vision', 'KrishiBondhu Crop Vision Classifier', '1.0.0', 'PyTorch', 'image_classification', 0.9250, 0.9180, TRUE),
+    ('chashiguard-cv-v1', 'ChashiGuard Disease Vision Classifier', '1.0.0', 'PyTorch', 'image_classification', 0.9250, 0.9180, FALSE)
 ON CONFLICT (model_code) DO UPDATE SET 
     name = EXCLUDED.name,
     version = EXCLUDED.version,

@@ -48,6 +48,9 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+import uuid
+
+
 def create_access_token(user_id: UUID, role_code: str) -> str:
     """
     Create a short-lived JWT access token.
@@ -56,6 +59,7 @@ def create_access_token(user_id: UUID, role_code: str) -> str:
       sub  - User UUID (string)
       role - User role code (e.g., 'farmer', 'expert', 'admin')
       typ  - Token type identifier ('access')
+      jti  - Unique token identifier (nonce)
       exp  - Expiration timestamp
       iat  - Issued-at timestamp
     """
@@ -64,6 +68,7 @@ def create_access_token(user_id: UUID, role_code: str) -> str:
         "sub": str(user_id),
         "role": role_code,
         "typ": "access",
+        "jti": str(uuid.uuid4()),
         "exp": expire,
         "iat": _utcnow(),
     }
@@ -72,15 +77,16 @@ def create_access_token(user_id: UUID, role_code: str) -> str:
 
 def create_refresh_token(user_id: UUID) -> str:
     """
-    Create a long-lived JWT refresh token.
+    Create a long-lived JWT refresh token with unique jti nonce.
 
-    Refresh tokens only carry the 'sub' and 'typ' claims.
+    Refresh tokens carry 'sub', 'typ', and a unique 'jti' per generation.
     They are used ONLY to issue new access tokens (see /api/v1/auth/refresh).
     """
     expire = _utcnow() + timedelta(days=settings.jwt_refresh_token_expire_days)
     payload = {
         "sub": str(user_id),
         "typ": "refresh",
+        "jti": str(uuid.uuid4()),
         "exp": expire,
         "iat": _utcnow(),
     }

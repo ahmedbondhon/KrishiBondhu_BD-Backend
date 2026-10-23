@@ -24,7 +24,7 @@ from typing import List, Optional, Tuple
 
 import httpx
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -37,6 +37,7 @@ from app.models.diagnosis import (
     CaseImage,
     CaseStatusHistory,
     DiagnosisCase,
+    ExpertProfile,
     ExpertReview,
 )
 from app.models.system import AuditLog, Notification, SystemFile
@@ -47,6 +48,7 @@ from app.schemas.diagnosis import (
     SubmitExpertReviewRequest,
     SubmitFeedbackRequest,
 )
+from app.services.storage_service import storage_service
 
 
 def _confidence_label(score: float) -> str:
@@ -60,14 +62,13 @@ def _confidence_label(score: float) -> str:
 
 def _generate_case_number() -> str:
     """
-    Generate a sequential-style case number.
+    Generate a unique case number.
     In production, this is handled by a DB trigger (013_indexes_and_triggers.sql).
-    This fallback is used in tests/dev environments without the trigger.
+    This fallback uses the year and a unique UUID segment to prevent collision.
     """
-    import random
     year = datetime.now(timezone.utc).year
-    seq = random.randint(100000, 999999)
-    return f"KB-{year}-{seq}"
+    suffix = uuid.uuid4().hex[:6].upper()
+    return f"KB-{year}-{suffix}"
 
 
 class DiagnosisService:
@@ -106,6 +107,34 @@ class DiagnosisService:
         # Verify case belongs to this farmer
         case = await self._get_case_for_farmer(db, case_id, farmer_id)
 
+        # Verify file exists and belongs to this farmer
+        file_result = await db.execute(
+            select(SystemFile).where(
+                SystemFile.id == payload.file_id,
+                SystemFile.is_deleted == False,
+            )
+        )
+        file_record = file_result.scalar_one_or_none()
+        if not file_record:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "FILE_NOT_FOUND", "message_bn": "ফাইলটি পাওয়া যায়নি।"},
+            )
+        if file_record.uploaded_by != farmer_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "FORBIDDEN", "message_bn": "অন্য ব্যবহারকারীর ফাইল যুক্ত করার অনুমতি নেই।"},
+            )
+
+        # If this image is primary, reset any previous primary images for this case
+        if payload.is_primary:
+            await db.execute(
+                update(CaseImage)
+                .where(CaseImage.case_id == case.id)
+                .values(is_primary=False)
+            )
+            case.primary_image_id = payload.file_id
+
         case_image = CaseImage(
             case_id=case.id,
             file_id=payload.file_id,
@@ -114,10 +143,6 @@ class DiagnosisService:
             created_at=datetime.now(timezone.utc),
         )
         db.add(case_image)
-
-        # Update primary image FK on the case if this is marked primary
-        if payload.is_primary:
-            case.primary_image_id = payload.file_id
 
         await db.flush()
         return case_image
@@ -144,6 +169,16 @@ class DiagnosisService:
         """
         case = await self._get_case_for_farmer(db, case_id, farmer_id)
 
+        # Prevent duplicate analysis on completed cases
+        if case.status in ("ai_analyzed", "expert_reviewed", "closed"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "CASE_ALREADY_ANALYZED",
+                    "message_bn": "এই কেসটি ইতিমধ্যে বিশ্লেষণ করা হয়েছে। পুনরায় বিশ্লেষণের প্রয়োজন নেই।",
+                },
+            )
+
         if not case.primary_image_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -161,12 +196,12 @@ class DiagnosisService:
                 detail={"code": "FILE_NOT_FOUND", "message_bn": "ছবিটি পাওয়া যায়নি।"},
             )
 
-        # Update status to processing
-        await self._update_status(db, case, "processing", changed_by=farmer_id, notes="AI analysis triggered")
-
-        # Get active AI model
+        # Get active AI model BEFORE committing
         model_result = await db.execute(
-            select(AIModel).where(AIModel.is_active == True)
+            select(AIModel)
+            .where(AIModel.is_active == True)
+            .order_by(AIModel.created_at.desc())
+            .limit(1)
         )
         ai_model = model_result.scalar_one_or_none()
         if not ai_model:
@@ -175,7 +210,11 @@ class DiagnosisService:
                 detail={"code": "NO_ACTIVE_MODEL", "message_bn": "AI সেবা বর্তমানে অনুপলব্ধ।"},
             )
 
-        # Call AI service
+        # Update status to processing and commit to release DB connection during external AI call
+        await self._update_status(db, case, "processing", changed_by=farmer_id, notes="AI analysis triggered")
+        await db.commit()
+
+        # Call AI service (executed with NO active DB transaction)
         ai_result = await self._call_ai_service(
             case_id=case.id,
             crop_id=case.crop_id,
@@ -263,6 +302,9 @@ class DiagnosisService:
             for r in ai_result.get("top_predictions", [])
         ]
 
+        # Explicitly commit all analysis results, predictions, and advisories to the DB
+        await db.commit()
+
         return DiagnosisResponse(
             case_id=case.id,
             case_number=case.case_number,
@@ -298,8 +340,13 @@ class DiagnosisService:
         image_base64: Optional[str] = None
         image_mime_type = "image/jpeg"
         try:
-            async with httpx.AsyncClient(timeout=10.0) as fetch_client:
-                img_response = await fetch_client.get(storage_path)
+            if storage_path.startswith("http://") or storage_path.startswith("https://"):
+                signed_url = storage_path
+            else:
+                signed_url = storage_service.generate_view_url(storage_path)
+
+            async with httpx.AsyncClient(timeout=5.0) as fetch_client:
+                img_response = await fetch_client.get(signed_url)
                 if img_response.status_code == 200:
                     image_base64 = base64.b64encode(img_response.content).decode("utf-8")
                     content_type = img_response.headers.get("content-type", "image/jpeg")
@@ -307,9 +354,9 @@ class DiagnosisService:
         except Exception:
             pass  # No image bytes — AI service will use mock fallback
 
-        # Step 2: Call AI service with image data
+        # Step 2: Call AI service with image data (timeout reduced to 15s to prevent DB pool exhaustion)
         try:
-            async with httpx.AsyncClient(timeout=45.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(
                     f"{settings.ai_service_url}/internal/v1/crop-diagnosis/predict",
                     json={
@@ -373,6 +420,23 @@ class DiagnosisService:
 
         if not template:
             return None  # No template found — case will still be marked diagnosed
+
+        # Check if an advisory already exists for this case to prevent UniqueViolationError
+        existing_adv_result = await db.execute(
+            select(Advisory).where(Advisory.case_id == case.id)
+        )
+        existing_advisory = existing_adv_result.scalar_one_or_none()
+        if existing_advisory:
+            existing_advisory.prediction_id = prediction.id
+            existing_advisory.template_id = template.id
+            existing_advisory.title_bn = template.title_bn
+            existing_advisory.summary_bn = f"{issue.name_bn} - {template.title_bn}"
+            existing_advisory.detailed_treatment_bn = template.content_bn
+            existing_advisory.preventive_measures_bn = template.preventive_measures_bn
+            existing_advisory.source = "ai_generated"
+            existing_advisory.is_published = True
+            await db.flush()
+            return existing_advisory
 
         advisory = Advisory(
             case_id=case.id,
@@ -463,6 +527,44 @@ class DiagnosisService:
             created_at=datetime.now(timezone.utc),
         ))
 
+        # Update or create Advisory record with expert diagnosis and treatment
+        advisory_result = await db.execute(
+            select(Advisory).where(Advisory.case_id == case.id)
+        )
+        advisory = advisory_result.scalar_one_or_none()
+        source = "expert_approved" if payload.agreed_with_ai else "expert_overridden"
+        title = payload.diagnosis_notes_bn[:100] if payload.diagnosis_notes_bn else "বিশেষজ্ঞ পর্যালোচনা পরামর্শ"
+        if not title.startswith("বিশেষজ্ঞ"):
+            title = f"বিশেষজ্ঞ পরামর্শ: {title}"
+
+        treatment_bn = payload.prescribed_treatment_bn or payload.diagnosis_notes_bn or "বিশেষজ্ঞ পরামর্শ দেওয়া হয়েছে।"
+        summary_bn = payload.diagnosis_notes_bn or "বিশেষজ্ঞ কর্তৃক পর্যালোচিত পরামর্শ।"
+
+        if advisory:
+            advisory.source = source
+            advisory.created_by = expert_user_id
+            advisory.detailed_treatment_bn = treatment_bn
+            advisory.summary_bn = summary_bn
+            advisory.title_bn = title
+            advisory.is_published = True
+        else:
+            pred_res = await db.execute(
+                select(AIPrediction).where(AIPrediction.case_id == case.id).order_by(AIPrediction.created_at.desc()).limit(1)
+            )
+            latest_pred = pred_res.scalar_one_or_none()
+            advisory = Advisory(
+                case_id=case.id,
+                prediction_id=latest_pred.id if latest_pred else None,
+                template_id=None,
+                title_bn=title,
+                summary_bn=summary_bn,
+                detailed_treatment_bn=treatment_bn,
+                source=source,
+                created_by=expert_user_id,
+                is_published=True,
+            )
+            db.add(advisory)
+
         # Dispatch in-app notification to the farmer
         db.add(Notification(
             user_id=case.farmer_id,
@@ -481,6 +583,71 @@ class DiagnosisService:
         await db.flush()
         return review
 
+    async def request_expert_review(
+        self,
+        db: AsyncSession,
+        case_id: uuid.UUID,
+        farmer_id: uuid.UUID,
+    ) -> DiagnosisCase:
+        """
+        Farmer explicitly requests expert review for an existing case.
+        Creates status history log, assigns available expert, creates CaseAssignment,
+        and logs audit trail.
+        """
+        case = await self._get_case_for_farmer(db, case_id, farmer_id)
+
+        if case.status not in ("submitted", "ai_analyzed"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "INVALID_CASE_STATUS",
+                    "message_bn": "শুধুমাত্র বিশ্লেষণ করা কেস বিশেষজ্ঞ পর্যালোচনার জন্য অনুরোধ করা যাবে।",
+                },
+            )
+
+        # Update case status and write to case_status_history
+        await self._update_status(
+            db,
+            case,
+            "escalated",
+            changed_by=farmer_id,
+            notes="Farmer requested expert review",
+        )
+
+        # Attempt to assign an available expert
+        expert_result = await db.execute(
+            select(ExpertProfile)
+            .where(ExpertProfile.is_available == True)
+            .order_by(ExpertProfile.rating.desc())
+            .limit(1)
+        )
+        expert_profile = expert_result.scalar_one_or_none()
+        if expert_profile:
+            case.assigned_expert_id = expert_profile.user_id
+            assignment = CaseAssignment(
+                case_id=case.id,
+                expert_id=expert_profile.user_id,
+                assigned_by=farmer_id,
+                status="assigned",
+                assigned_at=datetime.now(timezone.utc),
+            )
+            db.add(assignment)
+
+        # Audit log
+        db.add(
+            AuditLog(
+                user_id=farmer_id,
+                action="EXPERT_REVIEW_REQUESTED",
+                entity_name="case_mgmt.diagnosis_cases",
+                entity_id=case.id,
+                new_data={"case_id": str(case.id), "status": "escalated"},
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+
+        await db.flush()
+        return case
+
     # ── Feedback ──────────────────────────────────────────────────
 
     async def submit_feedback(
@@ -491,7 +658,10 @@ class DiagnosisService:
         payload: SubmitFeedbackRequest,
     ) -> AdvisoryFeedback:
         """Record farmer's outcome feedback for the advisory received."""
-        # Find the advisory for this case
+        # 1. Verify case ownership (farmer can only submit feedback for their own case)
+        await self._get_case_for_farmer(db, case_id, farmer_id)
+
+        # 2. Find the advisory for this case
         advisory_result = await db.execute(
             select(Advisory).where(Advisory.case_id == case_id)
         )
@@ -502,16 +672,31 @@ class DiagnosisService:
                 detail={"code": "ADVISORY_NOT_FOUND", "message_bn": "এই কেসের জন্য কোনো পরামর্শ পাওয়া যায়নি।"},
             )
 
-        feedback = AdvisoryFeedback(
-            advisory_id=advisory.id,
-            farmer_id=farmer_id,
-            rating=payload.rating,
-            is_helpful=payload.is_helpful,
-            feedback_text=payload.feedback_text,
-            outcome_status=payload.outcome_status,
-            created_at=datetime.now(timezone.utc),
+        # 3. Check if feedback already exists for this advisory from this farmer (prevent duplicates)
+        existing_fb_result = await db.execute(
+            select(AdvisoryFeedback).where(
+                AdvisoryFeedback.advisory_id == advisory.id,
+                AdvisoryFeedback.farmer_id == farmer_id,
+            )
         )
-        db.add(feedback)
+        feedback = existing_fb_result.scalar_one_or_none()
+        if feedback:
+            feedback.rating = payload.rating
+            feedback.is_helpful = payload.is_helpful
+            feedback.feedback_text = payload.feedback_text
+            feedback.outcome_status = payload.outcome_status
+            feedback.created_at = datetime.now(timezone.utc)
+        else:
+            feedback = AdvisoryFeedback(
+                advisory_id=advisory.id,
+                farmer_id=farmer_id,
+                rating=payload.rating,
+                is_helpful=payload.is_helpful,
+                feedback_text=payload.feedback_text,
+                outcome_status=payload.outcome_status,
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(feedback)
         await db.flush()
         return feedback
 

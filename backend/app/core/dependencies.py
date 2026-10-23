@@ -29,6 +29,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.security import verify_access_token
 from app.db.session import async_session_factory
@@ -40,12 +41,16 @@ from app.models.auth import User
 
 async def get_db() -> AsyncSession:  # type: ignore[return]
     """
-    Provide a transactional database session for a single request.
-    The session is committed on success and rolled back on exception.
+    Provide a scoped database session for a single request.
+    Commits on success and rolls back on exception.
     """
     async with async_session_factory() as session:
-        async with session.begin():
+        try:
             yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 # ─────────────────────────────────────────────────────────
@@ -87,7 +92,9 @@ async def get_current_user(
     if not user_id:
         raise credentials_exception
 
-    result = await db.execute(select(User).where(User.id == UUID(user_id)))
+    result = await db.execute(
+        select(User).options(selectinload(User.role)).where(User.id == UUID(user_id))
+    )
     user = result.scalar_one_or_none()
 
     if user is None or not user.is_active or user.is_deleted:

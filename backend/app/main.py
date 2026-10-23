@@ -62,6 +62,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Database connection FAILED: {e}")
 
+    try:
+        import asyncio
+        from app.services.storage_service import storage_service
+        await asyncio.to_thread(storage_service.warmup)
+        logger.info("✅ Storage service initialized.")
+    except Exception as e:
+        logger.warning(f"⚠️ Storage service warmup skipped: {e}")
+
     yield  # Application is running
 
     logger.info("🛑 KrishiBondhu API shutting down...")
@@ -108,6 +116,73 @@ app.add_middleware(
 
 
 # ── Global Exception Handlers ─────────────────────────────
+
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from app.core.responses import error_response
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """
+    Format standard HTTPException / StarletteHTTPException into the unified
+    KrishiBondhu error envelope format.
+    """
+    code = f"HTTP_{exc.status_code}"
+    message = "Request failed"
+    details = []
+
+    if isinstance(exc.detail, dict):
+        code = exc.detail.get("code", code)
+        message = exc.detail.get("message", exc.detail.get("message_bn", "Error"))
+        if "message_bn" in exc.detail:
+            details.append({"message_bn": exc.detail["message_bn"]})
+        if "details" in exc.detail and isinstance(exc.detail["details"], list):
+            details.extend(exc.detail["details"])
+    elif isinstance(exc.detail, str):
+        message = exc.detail
+    elif isinstance(exc.detail, list):
+        details = exc.detail
+
+    return error_response(
+        message=message,
+        error_code=code,
+        status_code=exc.status_code,
+        details=details if details else None,
+    )
+
+
+from sqlalchemy.exc import IntegrityError
+
+
+@app.exception_handler(IntegrityError)
+async def integrity_error_handler(request: Request, exc: IntegrityError):
+    """
+    Handle database constraint violations (ForeignKeyViolation, UniqueViolation, etc.)
+    and return clean, human-friendly Bangla messages instead of 500 crashes.
+    """
+    error_str = str(exc.orig if hasattr(exc, "orig") else exc).lower()
+    if "foreign key" in error_str or "violates foreign key constraint" in error_str:
+        return error_response(
+            message="Foreign key reference constraint violated",
+            error_code="FOREIGN_KEY_VIOLATION",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            details=[{"message_bn": "প্রদত্ত আইডি বা রেফারেন্স ডাটাবেজে খুঁজে পাওয়া যায়নি। অনুগ্রহ করে সঠিক তথ্য প্রদান করুন।"}],
+        )
+    elif "unique" in error_str or "violates unique constraint" in error_str:
+        return error_response(
+            message="Unique constraint violated",
+            error_code="UNIQUE_VIOLATION",
+            status_code=status.HTTP_409_CONFLICT,
+            details=[{"message_bn": "এই তথ্যটি ইতিমধ্যে ডাটাবেজে বিদ্যমান আছে।"}],
+        )
+    else:
+        return error_response(
+            message="Database integrity error",
+            error_code="INTEGRITY_ERROR",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            details=[{"message_bn": "ডাটাবেজ নিয়মের অসংগতির কারণে অনুরোধটি সম্পন্ন করা সম্ভব হয়নি।"}],
+        )
+
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):

@@ -12,6 +12,7 @@ When you add a new model file, ADD IT HERE.
 from app.models.auth import ConsentType, OtpLog, Role, User, UserConsent
 from app.models.catalog import Crop, CropVariety, GrowthStage, Issue, Remedy
 from app.models.farm import Plot, PlotCrop
+from app.models.geo import District, Division, Union, Upazila
 from app.models.system import AuditLog, Notification, SystemFile
 from app.models.diagnosis import (
     CaseAssignment,
@@ -29,6 +30,8 @@ __all__ = [
     "Role", "User", "ConsentType", "UserConsent", "OtpLog",
     # Catalog
     "Crop", "CropVariety", "GrowthStage", "Issue", "Remedy",
+    # Geo
+    "Division", "District", "Upazila", "Union",
     # Farm
     "Plot", "PlotCrop",
     # System

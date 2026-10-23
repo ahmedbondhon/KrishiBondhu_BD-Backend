@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     supabase_url: str = ""
     supabase_key: str = ""
     supabase_service_role_key: str = ""
+    supabase_project_ref: str = ""
 
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""

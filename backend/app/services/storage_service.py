@@ -21,6 +21,7 @@ Why not upload through the backend?
   - Reduces server memory usage.
 """
 
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -39,34 +40,55 @@ class StorageService:
 
     def __init__(self):
         self._s3_client = None
+        self._lock = threading.Lock()
+
+    def warmup(self) -> None:
+        """Pre-warm S3 client in a background thread to prevent blocking event loop on first request."""
+        self._get_s3_client()
 
     def _get_s3_client(self):
         """
-        Lazily initialize the S3-compatible client.
+        Lazily initialize the S3-compatible client thread-safely.
 
         For Supabase: endpoint_url points to the Supabase S3 API.
-        For AWS S3: no endpoint_url needed (uses default AWS endpoints).
+        The access key ID is the project reference ID, while secret key is the service role key.
+        For AWS S3: uses configured AWS credentials and region.
         """
         if self._s3_client is None:
-            if settings.storage_provider == "supabase":
-                # Supabase uses an S3-compatible API
-                self._s3_client = boto3.client(
-                    "s3",
-                    endpoint_url=f"{settings.supabase_url}/storage/v1/s3",
-                    aws_access_key_id=settings.supabase_service_role_key,
-                    aws_secret_access_key=settings.supabase_service_role_key,
-                    region_name="ap-southeast-1",
-                    config=Config(signature_version="s3v4"),
-                )
-            else:
-                # Standard AWS S3
-                self._s3_client = boto3.client(
-                    "s3",
-                    aws_access_key_id=settings.aws_access_key_id,
-                    aws_secret_access_key=settings.aws_secret_access_key,
-                    region_name=settings.aws_region,
-                    config=Config(signature_version="s3v4"),
-                )
+            with self._lock:
+                if self._s3_client is None:
+                    if settings.storage_provider == "supabase":
+                        project_ref = settings.supabase_project_ref
+                        if not project_ref and settings.supabase_url:
+                            clean_url = (
+                                settings.supabase_url.replace("https://", "")
+                                .replace("http://", "")
+                                .rstrip("/")
+                            )
+                            host = clean_url.split("/")[0]
+                            if ".supabase.co" in host:
+                                project_ref = host.split(".supabase.co")[0]
+                            elif "." in host:
+                                project_ref = host.split(".")[0]
+                        access_key = project_ref or settings.supabase_service_role_key
+                        endpoint = f"{settings.supabase_url.rstrip('/')}/storage/v1/s3" if settings.supabase_url else ""
+                        self._s3_client = boto3.client(
+                            "s3",
+                            endpoint_url=endpoint or None,
+                            aws_access_key_id=access_key,
+                            aws_secret_access_key=settings.supabase_service_role_key,
+                            region_name="ap-southeast-1",
+                            config=Config(signature_version="s3v4"),
+                        )
+                    else:
+                        # Standard AWS S3
+                        self._s3_client = boto3.client(
+                            "s3",
+                            aws_access_key_id=settings.aws_access_key_id,
+                            aws_secret_access_key=settings.aws_secret_access_key,
+                            region_name=settings.aws_region,
+                            config=Config(signature_version="s3v4"),
+                        )
         return self._s3_client
 
     def generate_upload_url(
@@ -75,6 +97,7 @@ class StorageService:
         mime_type: str,
         entity_type: Optional[str] = None,
         entity_id: Optional[uuid.UUID] = None,
+        user_id: Optional[uuid.UUID] = None,
     ) -> tuple[str, str]:
         """
         Generate a pre-signed PUT URL for direct client upload.
@@ -85,11 +108,12 @@ class StorageService:
             - storage_path : The object key (path) in the bucket, to be
                              passed back in the confirm-upload step.
         """
-        # Build a collision-resistant storage path
+        # Build a user-scoped, collision-resistant storage path
         file_ext = original_name.rsplit(".", 1)[-1].lower() if "." in original_name else "bin"
         folder = entity_type or "misc"
         file_uuid = uuid.uuid4()
-        storage_path = f"{folder}/{file_uuid}.{file_ext}"
+        user_prefix = f"{user_id}/" if user_id else ""
+        storage_path = f"{folder}/{user_prefix}{file_uuid}.{file_ext}"
 
         client = self._get_s3_client()
         upload_url = client.generate_presigned_url(

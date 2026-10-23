@@ -165,3 +165,31 @@ CREATE INDEX IF NOT EXISTS idx_system_audit_old_data_gin ON system.audit_logs US
 CREATE INDEX IF NOT EXISTS idx_system_audit_new_data_gin ON system.audit_logs USING GIN(new_data);
 CREATE INDEX IF NOT EXISTS idx_ai_predictions_raw_resp_gin ON ai.predictions USING GIN(raw_response);
 CREATE INDEX IF NOT EXISTS idx_climate_weather_raw_gin ON climate.weather_forecasts USING GIN(raw_forecast_data);
+
+
+-- ============================================================================
+-- 5. CASE NUMBER GENERATION TRIGGER
+-- ============================================================================
+
+CREATE SEQUENCE IF NOT EXISTS case_mgmt.diagnosis_case_number_seq START 1;
+
+CREATE OR REPLACE FUNCTION case_mgmt.generate_case_number()
+RETURNS TRIGGER AS $$
+DECLARE
+    current_year TEXT;
+    next_seq_val BIGINT;
+BEGIN
+    IF NEW.case_number IS NULL OR NEW.case_number = '' THEN
+        current_year := TO_CHAR(CURRENT_TIMESTAMP, 'YYYY');
+        next_seq_val := NEXTVAL('case_mgmt.diagnosis_case_number_seq');
+        NEW.case_number := 'KB-' || current_year || '-' || LPAD(next_seq_val::TEXT, 6, '0');
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trigger_case_mgmt_generate_case_number ON case_mgmt.diagnosis_cases;
+CREATE TRIGGER trigger_case_mgmt_generate_case_number
+BEFORE INSERT ON case_mgmt.diagnosis_cases
+FOR EACH ROW
+EXECUTE FUNCTION case_mgmt.generate_case_number();

@@ -93,6 +93,7 @@ async def get_upload_url(
         mime_type=payload.mime_type,
         entity_type=payload.entity_type,
         entity_id=payload.entity_id,
+        user_id=current_user.id,
     )
 
     return success_response(
@@ -119,6 +120,28 @@ async def confirm_upload(
       - Attach images to a diagnosis case.
       - Set a user avatar.
     """
+    # Storage path validation: ensure path was issued to this user
+    user_id_str = str(current_user.id)
+    if user_id_str not in payload.storage_path:
+        return error_response(
+            message="Invalid storage path for current user",
+            error_code="FORBIDDEN_STORAGE_PATH",
+            status_code=403,
+            details=[{"field": "storage_path", "message_bn": "অন্য ব্যবহারকারীর স্টোরেজ পাথ ব্যবহার করা অনুমোদিত নয়।"}],
+        )
+
+    # Check for duplicate registration of the same storage path
+    existing_file = await db.execute(
+        select(SystemFile).where(SystemFile.storage_path == payload.storage_path)
+    )
+    if existing_file.scalar_one_or_none():
+        return error_response(
+            message="File already registered",
+            error_code="FILE_ALREADY_REGISTERED",
+            status_code=409,
+            details=[{"field": "storage_path", "message_bn": "এই ফাইলটি ইতিমধ্যে নিবন্ধিত আছে।"}],
+        )
+
     system_file = SystemFile(
         uploaded_by=current_user.id,
         original_name=payload.original_name,
