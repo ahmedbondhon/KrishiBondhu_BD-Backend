@@ -58,6 +58,11 @@ class SystemFile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
+# Compatibility alias
+File = SystemFile
+
+
+
 class AuditLog(Base, UUIDPrimaryKeyMixin):
     """
     system.audit_logs — Append-only log of important system actions.

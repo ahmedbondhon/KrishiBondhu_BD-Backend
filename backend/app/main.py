@@ -114,6 +114,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Static / Uploads Mount ───────────────────────────────
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
+Path(settings.upload_dir, "avatars").mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=settings.upload_dir), name="static")
+app.mount("/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
+
+
+
 
 # ── Global Exception Handlers ─────────────────────────────
 
@@ -148,7 +158,9 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
         error_code=code,
         status_code=exc.status_code,
         details=details if details else None,
+        raw_detail=exc.detail,
     )
+
 
 
 from sqlalchemy.exc import IntegrityError

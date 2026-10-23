@@ -71,3 +71,11 @@ async_session_factory = async_sessionmaker(
     class_=AsyncSession,
     expire_on_commit=False,
 )
+
+
+async def get_db():
+    """Dependency helper yielding scoped async session."""
+    from app.core.dependencies import get_db as _core_get_db
+    async for s in _core_get_db():
+        yield s
+

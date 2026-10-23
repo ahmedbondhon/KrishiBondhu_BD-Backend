@@ -63,13 +63,7 @@ class AuthService:
                 },
             )
 
-        # 2. Resolve role (enforce farmer role for public registration)
-        if payload.role_code != "farmer":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"code": "ROLE_NOT_PERMITTED", "message_bn": "শুধুমাত্র কৃষক হিসেবে সরাসরি নিবন্ধন করা যাবে।"},
-            )
-
+        # 2. Resolve role
         role_result = await db.execute(
             select(Role).where(Role.code == payload.role_code)
         )
@@ -79,6 +73,14 @@ class AuthService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"code": "INVALID_ROLE", "message_bn": "অবৈধ ভূমিকা।"},
             )
+
+        # Enforce farmer role for public registration
+        if payload.role_code != "farmer":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "ROLE_NOT_PERMITTED", "message_bn": "শুধুমাত্র কৃষক হিসেবে সরাসরি নিবন্ধন করা যাবে।"},
+            )
+
 
         # 3. Create user
         user = User(

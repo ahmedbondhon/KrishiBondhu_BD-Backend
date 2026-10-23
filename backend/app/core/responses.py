@@ -86,7 +86,8 @@ def error_response(
     message: str,
     error_code: str,
     status_code: int = 400,
-    details: Optional[List[Dict]] = None,
+    details: Optional[Any] = None,
+    raw_detail: Optional[Any] = None,
 ) -> JSONResponse:
     """
     Build a standard error JSON response.
@@ -96,13 +97,14 @@ def error_response(
         error_code  : Machine-readable error code (e.g., 'VALIDATION_ERROR').
         status_code : HTTP status code (default 400).
         details     : Optional list of field-level validation errors.
-                      Each item: {"field": "...", "message_bn": "..."}
+        raw_detail  : Optional raw detail payload (for dict detail compatibility).
     """
     return JSONResponse(
         status_code=status_code,
         content={
             "success": False,
             "message": message,
+            "detail": raw_detail if raw_detail is not None else message,
             "error": {
                 "code": error_code,
                 "details": details or [],
@@ -110,3 +112,5 @@ def error_response(
             "meta": {"timestamp": _now_utc_iso()},
         },
     )
+
+

@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     storage_provider: str = "supabase"         # 'supabase' | 's3' | 'cloudinary'
     storage_bucket_name: str = "krishibondhu-uploads"
     storage_signed_url_expiry_seconds: int = 3600
+    upload_dir: str = "uploads"
+    max_file_size_bytes: int = 2 * 1024 * 1024
+    public_base_url: str = "http://localhost:8000"
+
+
 
     supabase_url: str = ""
     supabase_key: str = ""

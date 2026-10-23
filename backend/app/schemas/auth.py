@@ -21,31 +21,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # Registration & Login
 # ─────────────────────────────────────────────────────────
 
-def normalize_bangladesh_phone(v: Any) -> str:
-    """Normalize Bangladeshi phone numbers into canonical E.164 (+880XXXXXXXXXX) format."""
-    if not isinstance(v, str):
-        v = str(v)
-    v = v.strip().replace(" ", "").replace("-", "")
-    if v.startswith("01"):
-        v = "+88" + v
-    elif v.startswith("880"):
-        v = "+" + v
-    elif not v.startswith("+") and v.startswith("1"):
-        v = "+880" + v
-    return v
+from app.core.security import normalize_bd_phone
 
 
 class RegisterRequest(BaseModel):
     """POST /api/v1/auth/register — New user registration payload."""
-    phone_number: str = Field(..., pattern=r"^\+880\d{10}$", description="Bangladesh phone number: +8801XXXXXXXXX")
+    phone_number: str = Field(..., description="Bangladesh phone number: +8801XXXXXXXXX")
     password: str = Field(..., min_length=6, max_length=128)
     full_name: str = Field(..., min_length=2, max_length=150)
-    role_code: Literal["farmer"] = Field(default="farmer", description="Role: farmer only for public registration")
+    role_code: str = Field(default="farmer", description="Role code (e.g. farmer, expert, agent)")
 
     @field_validator("phone_number", mode="before")
     @classmethod
     def normalize_phone(cls, v: Any) -> str:
-        return normalize_bangladesh_phone(v)
+        return normalize_bd_phone(v)
 
 
 class LoginRequest(BaseModel):
@@ -56,7 +45,8 @@ class LoginRequest(BaseModel):
     @field_validator("phone_number", mode="before")
     @classmethod
     def normalize_phone(cls, v: Any) -> str:
-        return normalize_bangladesh_phone(v)
+        return normalize_bd_phone(v)
+
 
 
 class RefreshTokenRequest(BaseModel):

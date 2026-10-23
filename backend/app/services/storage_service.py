@@ -26,8 +26,12 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-import boto3
-from botocore.client import Config
+try:
+    import boto3
+    from botocore.client import Config
+except ImportError:
+    boto3 = None
+    Config = None
 
 from app.core.config import settings
 
@@ -43,6 +47,7 @@ class StorageService:
         self._lock = threading.Lock()
 
     def warmup(self) -> None:
+
         """Pre-warm S3 client in a background thread to prevent blocking event loop on first request."""
         self._get_s3_client()
 

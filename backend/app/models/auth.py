@@ -71,7 +71,8 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     union_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     preferred_language: Mapped[str] = mapped_column(String(10), default="bn", nullable=False)
-    avatar_url: Mapped[Optional[str]] = mapped_column(Text)
+    avatar_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -79,6 +80,24 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Relationships
     role: Mapped["Role"] = relationship("Role", back_populates="users")
     consents: Mapped[List["UserConsent"]] = relationship("UserConsent", back_populates="user")
+    refresh_tokens: Mapped[List["RefreshToken"]] = relationship("RefreshToken", back_populates="user", cascade="all, delete-orphan")
+    login_attempts: Mapped[List["LoginAttempt"]] = relationship("LoginAttempt", back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def effective_status(self) -> str:
+        if self.is_deleted:
+            return "deleted"
+        if not self.is_active:
+            return "inactive"
+        return self.status
+
+
+    @property
+    def role_code(self) -> str:
+        if self.role:
+            return self.role.code
+        return "farmer"
+
 
 
 class ConsentType(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -128,7 +147,71 @@ class OtpLog(Base, UUIDPrimaryKeyMixin):
     __table_args__ = {"schema": "auth"}
 
     phone_number: Mapped[str] = mapped_column(String(20), nullable=False)
-    otp_code: Mapped[str] = mapped_column(String(10), nullable=False)
+    otp_code: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    otp_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    purpose: Mapped[str] = mapped_column(String(50), default="registration", nullable=False)
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    verify_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class RefreshToken(Base, UUIDPrimaryKeyMixin):
+    """Stores issued refresh tokens for rotation and revocation."""
+    __tablename__ = "refresh_tokens"
+    __table_args__ = {"schema": "auth"}
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("auth.users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(String(512), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    user: Mapped["User"] = relationship("User", back_populates="refresh_tokens")
+
+
+class LoginAttempt(Base, UUIDPrimaryKeyMixin):
+    """Tracks failed login attempts for lockout enforcement."""
+    __tablename__ = "login_attempts"
+    __table_args__ = {"schema": "auth"}
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("auth.users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    user: Mapped["User"] = relationship("User", back_populates="login_attempts")
+
+
+
+class AdminAction(Base, UUIDPrimaryKeyMixin):
+    """Tracks administrative actions."""
+    __tablename__ = "admin_actions"
+    __table_args__ = {"schema": "audit"}
+
+    actor_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("auth.users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    target_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    target_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ip_address: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
