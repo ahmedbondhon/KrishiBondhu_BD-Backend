@@ -22,7 +22,7 @@ __pycache__/
 .DS_Store
 
 # Demo folder (local testing only, not for git push)
-demo/
+
 uploads/
 
 docs
