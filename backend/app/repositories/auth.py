@@ -243,6 +243,7 @@ class AuthRepository:
         phone_number: str,
         purpose: str,
         for_update: bool = False,
+        **kwargs,
     ) -> Optional[OtpLog]:
         """Fetch the latest active OTP that is neither expired, used, nor maxed-out."""
         phone_number = normalize_bd_phone(phone_number)
