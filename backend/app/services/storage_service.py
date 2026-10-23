@@ -190,6 +190,25 @@ class StorageService:
         """
         import asyncio
         return await asyncio.to_thread(self._check_file_exists_sync, storage_path)
+    def _delete_file_sync(self, storage_path: str, bucket_name: Optional[str] = None) -> bool:
+        try:
+            client = self._get_s3_client()
+            bucket = bucket_name or settings.storage_bucket_name
+            client.delete_object(
+                Bucket=bucket,
+                Key=storage_path.lstrip("/"),
+            )
+            return True
+        except Exception:
+            return False
+
+    async def delete_file(self, storage_path: str, bucket_name: Optional[str] = None) -> bool:
+        """
+        Delete a file from object storage (S3 / Supabase S3-compatible API).
+        Executed off-thread to avoid blocking the event loop.
+        """
+        import asyncio
+        return await asyncio.to_thread(self._delete_file_sync, storage_path, bucket_name)
 
 
 

@@ -218,7 +218,7 @@ class OtpService:
 
     async def verify_otp(self, phone_number: str, otp_code: str, purpose: str = "registration") -> dict:
         phone = normalize_bd_phone(phone_number)
-        record = await self.repo.get_latest_otp(phone_number=phone, purpose=purpose)
+        record = await self.repo.get_latest_otp(phone_number=phone, purpose=purpose, for_update=True)
         if not record:
             raise InvalidOtpError("No pending OTP found for this number. Please request a new OTP.")
         if record.expires_at < datetime.now(timezone.utc):

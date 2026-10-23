@@ -315,7 +315,10 @@ class TestFarmerAvatarHandling:
 
     def test_delete_avatar_success(self, mock_farmer):
         """Deleting avatar sets avatar_url to NULL in auth.users and returns success message."""
+        mock_db = AsyncMock()
+        mock_db.commit = AsyncMock()
         app.dependency_overrides[get_current_user] = lambda: mock_farmer
+        app.dependency_overrides[get_db] = lambda: mock_db
 
         with patch.object(
             ProfileRepository,
@@ -325,7 +328,11 @@ class TestFarmerAvatarHandling:
             ProfileRepository,
             "set_avatar",
             new=AsyncMock(),
-        ) as mock_set_avatar:
+        ) as mock_set_avatar, patch.object(
+            ProfileRepository,
+            "soft_delete_avatar_files",
+            new=AsyncMock(),
+        ):
             res = client.delete("/api/v1/farmer/profile/avatar")
             assert res.status_code == 200
             data = res.json()

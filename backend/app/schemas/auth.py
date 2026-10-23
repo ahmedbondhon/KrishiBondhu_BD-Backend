@@ -204,7 +204,7 @@ def validate_bd_phone(phone: Any) -> str:
 
     if not BD_LOCAL_REGEX.match(cleaned):
         raise ValueError(
-            "Invalid Bangladesh phone number. Expected 11 digits starting with 013-019"
+            "বাংলাদেশের শুধুমাত্র বৈধ মোবাইল অপারেটর নম্বর গ্রহণযোগ্য (০১৩, ০১৪, ০১৫, ০১৬, ০১৭, ০১৮, ০১৯)। Invalid operator prefix or number."
         )
     return cleaned
 

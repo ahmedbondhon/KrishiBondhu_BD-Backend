@@ -241,7 +241,10 @@ def normalize_bd_phone(v: Any) -> str:
         s = s[1:]
 
     if not re.match(r"^1[3-9]\d{8}$", s):
-        raise ValueError(f"Invalid Bangladesh phone number: {v}")
+        raise ValueError(
+            f"Invalid Bangladesh mobile operator prefix or number: {v}. "
+            "Must be an 11-digit valid Bangladeshi mobile operator number starting with 013, 014, 015, 016, 017, 018, or 019."
+        )
 
     return NormalizedPhone(f"+880{s}")
 

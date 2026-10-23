@@ -20,7 +20,7 @@ Routes (Expert-facing):
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -165,7 +165,7 @@ async def get_case(
 
     # Build response
     advisory_data = None
-    if case.advisory:
+    if case.advisory and getattr(case.advisory, "is_published", True):
         advisory_data = {
             "title_bn": case.advisory.title_bn,
             "summary_bn": case.advisory.summary_bn,
@@ -255,6 +255,28 @@ async def get_case(
             "created_at": case.created_at.isoformat() if case.created_at else None,
         },
         message="কেসের তথ্য পাওয়া গেছে।",
+    )
+
+
+@router.delete("/diagnosis-cases/{case_id}", summary="Delete diagnosis case and trigger storage cleanup")
+async def delete_diagnosis_case(
+    case_id: UUID,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Soft-deletes a diagnosis case and queues background garbage collection
+    for any orphaned uploaded images in object storage (Supabase/S3).
+    """
+    user_role = getattr(current_user, "role_code", "") or (current_user.role.code if getattr(current_user, "role", None) else "")
+    await diagnosis_service.delete_case_with_cleanup(
+        db, case_id, current_user.id, user_role=user_role, background_tasks=background_tasks
+    )
+    await db.commit()
+    return success_response(
+        data={"case_id": str(case_id), "status": "deleted"},
+        message="কেসটি সফলভাবে মুছে ফেলা হয়েছে এবং স্টোরেজ ক্লিনআপ শুরু হয়েছে।",
     )
 
 

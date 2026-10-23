@@ -24,6 +24,7 @@ from app.models.diagnosis import (
 )
 from app.models.ai import AIModel, AIModelFeedback, AIPrediction, AIPredictionDetail
 from app.models.advisory import Advisory, AdvisoryFeedback, AdvisoryTemplate
+from app.models.market import GroupSellingOffer, OfferParticipant
 
 __all__ = [
     # Auth
@@ -43,4 +44,6 @@ __all__ = [
     "AIModel", "AIPrediction", "AIPredictionDetail", "AIModelFeedback",
     # Advisory
     "AdvisoryTemplate", "Advisory", "AdvisoryFeedback",
+    # Market
+    "GroupSellingOffer", "OfferParticipant",
 ]

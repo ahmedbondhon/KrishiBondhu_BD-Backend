@@ -13,10 +13,11 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.deps import require_roles
+from app.models.advisory import Advisory
 from app.models.ai import AIModel
 from app.models.auth import Role, User
 from app.models.catalog import Issue
-from app.models.diagnosis import CaseAssignment, DiagnosisCase
+from app.models.diagnosis import CaseAssignment, CaseImage, DiagnosisCase
 from app.models.system import SystemFile
 from app.schemas.auth import ResetPasswordRequest, validate_strong_password
 from app.schemas.diagnosis import SubmitExpertReviewRequest
@@ -1073,3 +1074,201 @@ class TestPaginationEdgeCases:
         # list_farms
         resp3 = await list_farms(limit=15, offset=0, current_user=user, db=mock_db)
         assert resp3.status_code == 200
+
+
+# ── 5. AI Advisory, Storage Clean-up, and Concurrency Locking Fixes ───────────
+
+class TestEdgeCasesAndConcurrencyFixes:
+    @pytest.mark.asyncio
+    async def test_low_confidence_escalation_deactivates_stale_advisory(self):
+        """Edge Case 1: Low-confidence AI analysis deactivates any existing advisory."""
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        case_id = uuid.uuid4()
+        farmer_id = uuid.uuid4()
+        primary_file_id = uuid.uuid4()
+        case = DiagnosisCase(
+            id=case_id,
+            case_number="KB-2026-000099",
+            farmer_id=farmer_id,
+            status="submitted",
+            urgency_level="medium",
+            primary_image_id=primary_file_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        existing_advisory = Advisory(
+            id=uuid.uuid4(),
+            case_id=case_id,
+            title_bn="পুরনো পরামর্শ",
+            summary_bn="পুরনো সারাংশ",
+            detailed_treatment_bn="পুরনো চিকিৎসা",
+            is_published=True,
+        )
+
+        mock_model = MagicMock()
+        mock_model.id = uuid.uuid4()
+        mock_model.version = "v1"
+
+        def mock_execute(stmt, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(stmt).lower()
+            if "case_mgmt.diagnosis_cases" in q_str:
+                res.scalar_one_or_none.return_value = case
+            elif "case_images" in q_str:
+                img = MagicMock()
+                img.file_id = uuid.uuid4()
+                res.scalars.return_value.all.return_value = [img]
+            elif "system.files" in q_str or "files" in q_str:
+                f = MagicMock()
+                f.storage_path = "cases/img.jpg"
+                res.scalar_one_or_none.return_value = f
+            elif "ai.models" in q_str or "models" in q_str:
+                res.scalar_one_or_none.return_value = mock_model
+            elif "catalog.issues" in q_str:
+                res.scalars.return_value.all.return_value = []
+            elif "advisory.advisories" in q_str or "advisories" in q_str:
+                res.scalar_one_or_none.return_value = existing_advisory
+            else:
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        # Mock AI service returning low confidence
+        with patch.object(service, "_call_ai_service", new_callable=AsyncMock) as mock_ai:
+            mock_ai.return_value = {
+                "confidence_score": 0.40,
+                "urgency_level": "medium",
+                "is_confident": False,
+                "model_version": "v1",
+                "top_predictions": [],
+            }
+
+            resp = await service.analyze_case(mock_db, case_id=case_id, farmer_id=farmer_id)
+            assert resp.case_status == "escalated"
+            assert existing_advisory.is_published is False
+
+    @pytest.mark.asyncio
+    async def test_case_deletion_triggers_background_storage_cleanup(self):
+        """Edge Case 2: Deleting a case marks files as deleted and enqueues storage deletion."""
+        service = DiagnosisService()
+        mock_db = AsyncMock()
+
+        case_id = uuid.uuid4()
+        farmer_id = uuid.uuid4()
+        case = DiagnosisCase(
+            id=case_id,
+            farmer_id=farmer_id,
+            status="submitted",
+            is_deleted=False,
+        )
+        file_id = uuid.uuid4()
+        case_image = CaseImage(
+            id=uuid.uuid4(),
+            case_id=case_id,
+            file_id=file_id,
+        )
+        sys_file = SystemFile(
+            id=file_id,
+            storage_path="cases/photo.jpg",
+            bucket_name="krishibondhu-uploads",
+            is_deleted=False,
+        )
+
+        def mock_execute(stmt, *args, **kwargs):
+            res = MagicMock()
+            q_str = str(stmt).lower()
+            if "case_mgmt.diagnosis_cases" in q_str:
+                res.scalar_one_or_none.return_value = case
+            elif "case_images" in q_str:
+                res.scalars.return_value.all.return_value = [case_image]
+            elif "system.files" in q_str or "files" in q_str:
+                res.scalars.return_value.all.return_value = [sys_file]
+            else:
+                res.scalars.return_value.all.return_value = []
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        mock_bg = MagicMock()
+        deleted = await service.delete_case_with_cleanup(
+            mock_db, case_id=case_id, user_id=farmer_id, user_role="farmer", background_tasks=mock_bg
+        )
+        assert deleted is True
+        assert case.is_deleted is True
+        assert case.status == "closed"
+        assert sys_file.is_deleted is True
+        assert sys_file.deleted_at is not None
+        assert mock_bg.add_task.called
+
+    @pytest.mark.asyncio
+    async def test_group_selling_with_for_update_prevents_race_conditions(self):
+        """Edge Case 3: Joining group selling offer uses row-level locking (with_for_update) and atomic aggregation."""
+        from app.services.market_service import market_service
+        from app.models.market import GroupSellingOffer
+
+        mock_db = AsyncMock()
+        offer_id = uuid.uuid4()
+        farmer_id = uuid.uuid4()
+
+        offer = GroupSellingOffer(
+            id=offer_id,
+            target_quantity_kg=Decimal("1000.00"),
+            min_participant_quantity_kg=Decimal("50.00"),
+            current_aggregated_kg=Decimal("900.00"),
+            status="open",
+            is_deleted=False,
+        )
+
+        executed_statements = []
+
+        def mock_execute(stmt, *args, **kwargs):
+            executed_statements.append(stmt)
+            res = MagicMock()
+            q_str = str(stmt).lower()
+            if "market.group_selling_offers" in q_str or "group_selling_offers" in q_str:
+                res.scalar_one_or_none.return_value = offer
+            elif "market.offer_participants" in q_str or "offer_participants" in q_str:
+                res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        participant = await market_service.join_group_offer(
+            mock_db,
+            offer_id=offer_id,
+            farmer_id=farmer_id,
+            offered_quantity_kg=Decimal("150.00"),
+        )
+        assert participant.farmer_id == farmer_id
+        assert offer.current_aggregated_kg == Decimal("1050.00")
+        assert offer.status == "target_reached"
+
+        # Verify that with_for_update() was attached to the query
+        first_stmt = executed_statements[0]
+        assert hasattr(first_stmt, "_for_update_arg") and first_stmt._for_update_arg is not None
+
+    @pytest.mark.asyncio
+    async def test_otp_verification_applies_row_level_locking(self):
+        """Edge Case 3: get_latest_otp supports with_for_update row lock to prevent double verification race."""
+        from app.repositories.auth import AuthRepository
+
+        mock_db = AsyncMock()
+        repo = AuthRepository(mock_db)
+
+        executed_stmts = []
+
+        def mock_execute(stmt, *args, **kwargs):
+            executed_stmts.append(stmt)
+            res = MagicMock()
+            res.scalar_one_or_none.return_value = None
+            return res
+
+        mock_db.execute.side_effect = mock_execute
+
+        await repo.get_latest_otp("01711223344", purpose="login", for_update=True)
+        assert len(executed_stmts) == 1
+        stmt = executed_stmts[0]
+        assert hasattr(stmt, "_for_update_arg") and stmt._for_update_arg is not None

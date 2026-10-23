@@ -384,6 +384,14 @@ class DiagnosisService:
                     }
             else:
                 # Low confidence → escalate to expert
+                # Deactivate/unpublish any previously generated advisory to prevent stale advice
+                existing_adv_res = await db.execute(
+                    select(Advisory).where(Advisory.case_id == case.id)
+                )
+                existing_adv = existing_adv_res.scalar_one_or_none()
+                if existing_adv:
+                    existing_adv.is_published = False
+
                 await self._update_status(
                     db, case, "escalated",
                     notes="Low confidence — escalated to expert review queue"
@@ -975,6 +983,46 @@ class DiagnosisService:
         )
         db.add(history)
         case.status = new_status
+
+    async def delete_case_with_cleanup(
+        self,
+        db: AsyncSession,
+        case_id: uuid.UUID,
+        user_id: uuid.UUID,
+        user_role: str = "farmer",
+        background_tasks = None,
+        **kwargs,
+    ) -> bool:
+        """
+        Soft-delete diagnosis case and clean up / mark attached files for storage garbage collection.
+        Orphaned storage files are deleted asynchronously via background tasks / storage_service.
+        """
+        case = await self._get_case_for_farmer(db, case_id, user_id, user_role=user_role)
+        now_utc = datetime.now(timezone.utc)
+        case.is_deleted = True
+        case.status = "closed"
+
+        # Load associated case images and files
+        images_res = await db.execute(
+            select(CaseImage).where(CaseImage.case_id == case.id)
+        )
+        case_images = images_res.scalars().all()
+        file_ids = [img.file_id for img in case_images if img.file_id]
+
+        if file_ids:
+            files_res = await db.execute(
+                select(SystemFile).where(SystemFile.id.in_(file_ids), SystemFile.is_deleted == False)
+            )
+            files_to_cleanup = files_res.scalars().all()
+            for f in files_to_cleanup:
+                f.is_deleted = True
+                f.deleted_at = now_utc
+                # Background cleanup from storage provider
+                if background_tasks:
+                    background_tasks.add_task(storage_service.delete_file, f.storage_path, f.bucket_name)
+
+        await db.flush()
+        return True
 
 
 diagnosis_service = DiagnosisService()

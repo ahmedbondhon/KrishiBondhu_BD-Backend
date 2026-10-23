@@ -242,6 +242,7 @@ class AuthRepository:
         self,
         phone_number: str,
         purpose: str,
+        for_update: bool = False,
     ) -> Optional[OtpLog]:
         """Fetch the latest active OTP that is neither expired, used, nor maxed-out."""
         phone_number = normalize_bd_phone(phone_number)
@@ -259,6 +260,8 @@ class AuthRepository:
             .order_by(OtpLog.created_at.desc())
             .limit(1)
         )
+        if for_update:
+            stmt = stmt.with_for_update()
         result = await self.db.execute(stmt)
         return await self._extract_entity(result, OtpLog)
 
