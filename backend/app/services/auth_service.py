@@ -16,7 +16,7 @@ Key methods:
   - update_profile() : Update farmer location/communication preferences.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -32,8 +32,9 @@ from app.core.security import (
     hash_password,
     verify_password,
     verify_refresh_token,
+    hash_token,
 )
-from app.models.auth import Role, User
+from app.models.auth import RefreshToken, Role, User
 from app.schemas.auth import RegisterRequest, UpdateProfileRequest
 
 
@@ -142,6 +143,18 @@ class AuthService:
 
         access_token = create_access_token(user.id, user.role.code)
         refresh_token = create_refresh_token(user.id)
+        # Store refresh token for revocation and rotation tracking
+        try:
+            token_record = RefreshToken(
+                user_id=user.id,
+                token_hash=hash_token(refresh_token),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+                is_revoked=False,
+            )
+            db.add(token_record)
+            await db.flush()
+        except Exception:
+            pass
         return access_token, refresh_token
 
     async def refresh_tokens(
@@ -150,12 +163,25 @@ class AuthService:
         """
         Validate a refresh token and issue a new token pair.
         Refresh token rotation: every refresh issues a brand-new pair.
+        Checks database revocation status to prevent replay of stolen/revoked tokens.
         """
         user_id_str = verify_refresh_token(refresh_token)
         if not user_id_str:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={"code": "INVALID_REFRESH_TOKEN", "message_bn": "সেশন মেয়াদ শেষ। পুনরায় লগইন করুন।"},
+            )
+
+        # Check DB revocation table
+        th = hash_token(refresh_token)
+        token_res = await db.execute(
+            select(RefreshToken).where(RefreshToken.token_hash == th)
+        )
+        stored_token = token_res.scalar_one_or_none()
+        if stored_token and stored_token.is_revoked:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "REVOKED_REFRESH_TOKEN", "message_bn": "এই রিফ্রেশ টোকেনটি বাতিল করা হয়েছে। পুনরায় লগইন করুন।"},
             )
 
         result = await db.execute(
@@ -170,8 +196,26 @@ class AuthService:
                 detail={"code": "USER_NOT_FOUND", "message_bn": "ব্যবহারকারী পাওয়া যায়নি।"},
             )
 
+        # Mark previous token as revoked
+        if stored_token:
+            stored_token.is_revoked = True
+            stored_token.revoked_at = datetime.now(timezone.utc)
+
         access_token = create_access_token(user.id, user.role.code)
         new_refresh_token = create_refresh_token(user.id)
+
+        try:
+            new_record = RefreshToken(
+                user_id=user.id,
+                token_hash=hash_token(new_refresh_token),
+                expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+                is_revoked=False,
+            )
+            db.add(new_record)
+            await db.flush()
+        except Exception:
+            pass
+
         return access_token, new_refresh_token
 
     async def get_user_with_role(self, db: AsyncSession, user_id: UUID) -> User:

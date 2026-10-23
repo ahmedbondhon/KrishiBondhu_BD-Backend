@@ -140,31 +140,6 @@ class ConsentRequiredError(HTTPException):
         )
 
 
-def register_exception_handlers(app):
-    """Register standard validation and HTTP exception handlers."""
-    from fastapi.exceptions import RequestValidationError
-    from fastapi.responses import JSONResponse
+# Standard exception handler registration note:
+# Exception handlers are unified in `app.main:app` using KrishiBondhu response envelope.
 
-    @app.exception_handler(RequestValidationError)
-    async def validation_error_handler(_, exc: RequestValidationError):
-        errors = [
-            {"field": ".".join(str(part) for part in error["loc"]), "message": error["msg"]}
-            for error in exc.errors()
-        ]
-        detail = "; ".join(f"{e['field']}: {e['message']}" for e in errors)
-        return JSONResponse(
-            status_code=422,
-            content={
-                "detail": detail,
-                "message": "ইনপুট তথ্য সঠিক নয় / Invalid input.",
-                "errors": errors,
-            },
-        )
-
-    @app.exception_handler(HTTPException)
-    async def http_exception_handler(_, exc: HTTPException):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": exc.detail, "message": exc.detail},
-            headers=exc.headers,
-        )

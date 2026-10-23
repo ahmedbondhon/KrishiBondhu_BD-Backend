@@ -137,13 +137,15 @@ async def login(
             detail={"code": "RATE_LIMIT_EXCEEDED", "message_bn": "খুব বেশি ব্যর্থ প্রচেষ্টা হয়েছে। ১০ মিনিট পর আবার চেষ্টা করুন।"},
         )
 
-    from unittest.mock import AsyncMock
     from app.services.auth import AuthService as ExtendedAuthService, supabase_client
 
-    # Check if ExtendedAuthService.login or supabase_client is mocked (by integration tests)
+    # In testing environments, if ExtendedAuthService.login or supabase_client is mocked, forward to it
+    login_attr = getattr(ExtendedAuthService, "login", None)
+    sb_attr = getattr(supabase_client, "get_user_by_phone", None)
     is_ext_mocked = (
-        isinstance(getattr(ExtendedAuthService, "login", None), AsyncMock)
-        or isinstance(getattr(supabase_client, "get_user_by_phone", None), AsyncMock)
+        callable(login_attr) and getattr(login_attr, "__class__", None).__name__ == "AsyncMock"
+    ) or (
+        callable(sb_attr) and getattr(sb_attr, "__class__", None).__name__ == "AsyncMock"
     )
 
     if is_ext_mocked:

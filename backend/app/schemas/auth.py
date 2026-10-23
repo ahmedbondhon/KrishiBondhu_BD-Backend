@@ -11,6 +11,8 @@ All schemas use `model_config = ConfigDict(from_attributes=True)` to allow
 direct creation from SQLAlchemy ORM model instances (replaces Pydantic v1's `orm_mode`).
 """
 
+import re
+import uuid
 from datetime import datetime
 from typing import Any, Literal, Optional, Union
 from uuid import UUID
@@ -160,27 +162,13 @@ class UpdateProfileRequest(BaseModel):
     union_id: Optional[UUID] = None
     preferred_language: Optional[str] = Field(None, pattern="^(bn|en)$")
     avatar_url: Optional[str] = None
+
 # ============================================================================
 # KrishiBondhu Bangladesh — Auth & Geo Pydantic Schemas
 # Request/Response DTOs for multi-step registration, OTP, login, and support
 # ============================================================================
 
-import re
-import uuid
-from datetime import datetime
-from typing import Literal, Optional
-
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    EmailStr,
-    Field,
-    field_validator,
-    model_validator,
-)
-
 from app.core.config import get_settings
-from app.core.security import normalize_bd_phone
 
 # --------------------------------------------------------------------------
 # Constants & Validators

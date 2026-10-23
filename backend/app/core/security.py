@@ -46,6 +46,11 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 
+def hash_token(token: str) -> str:
+    """SHA-256 hash a refresh token for secure database storage."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 
 # --- JWT Tokens ---
 

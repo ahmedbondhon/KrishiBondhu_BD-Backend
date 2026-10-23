@@ -50,7 +50,8 @@ class ProfileService:
             if clean_path.startswith("avatars/"):
                 clean_path = f"static/{clean_path}"
             elif clean_path.startswith("uploads/"):
-                clean_path = f"static/{clean_path[8:]}"
+                # upload_dir is mounted at /static and /uploads
+                clean_path = f"static/{clean_path[8:]}" if clean_path[8:].startswith("avatars/") else f"static/{clean_path}"
             elif not clean_path.startswith("static/"):
                 clean_path = f"static/{clean_path}"
             avatar_url = f"{settings.public_base_url.rstrip('/')}/{clean_path}"

@@ -281,6 +281,20 @@ class AuthRepository:
         )
         await self.db.execute(stmt)
 
+    async def get_otp_by_id(self, otp_id: uuid.UUID) -> Optional[OtpLog]:
+        stmt = select(OtpLog).where(OtpLog.id == otp_id)
+        result = await self.db.execute(stmt)
+        return await self._extract_entity(result, OtpLog)
+
+    async def mark_otp_consumed(self, otp_id: uuid.UUID) -> None:
+        """Mark OTP verification token as consumed to prevent replay across workers."""
+        stmt = (
+            update(OtpLog)
+            .where(OtpLog.id == otp_id)
+            .values(is_used=True)
+        )
+        await self.db.execute(stmt)
+
     async def mark_otp_verified(self, otp_id: uuid.UUID) -> None:
         """Mark OTP as verified and used (single-use enforcement)."""
         stmt = (
@@ -355,10 +369,13 @@ class AuthRepository:
             )
             await self._add_and_flush(consent_type)
 
+        now = datetime.now(timezone.utc)
         user_consent = UserConsent(
             user_id=user_id,
             consent_type_id=consent_type.id,
             is_granted=is_granted,
+            granted_at=now if is_granted else None,
+            created_at=now,
             ip_address=ip_address,
             user_agent=user_agent,
         )

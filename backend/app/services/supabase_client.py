@@ -137,9 +137,12 @@ class SupabaseClient:
     async def record_user_consent(self, user_id: str, code: str, ip: str | None, ua: str | None, is_granted: bool = True) -> None:
         ct = await self._request("GET", f"consent_types?code=eq.{code}")
         if ct:
+            now_iso = datetime.now(timezone.utc).isoformat()
             await self._request("POST", "user_consents", json={
                 "user_id": user_id, "consent_type_id": ct[0]["id"],
                 "is_granted": is_granted, "ip_address": ip, "user_agent": ua,
+                "granted_at": now_iso if is_granted else None,
+                "created_at": now_iso,
             })
 
     async def upload_storage_file(self, bucket: str, path: str, content: bytes, mime_type: str) -> str | None:

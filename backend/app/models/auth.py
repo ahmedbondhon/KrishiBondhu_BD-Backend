@@ -137,11 +137,11 @@ class UserConsent(Base, UUIDPrimaryKeyMixin):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
     consent_type_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.consent_types.id", ondelete="RESTRICT"), nullable=False)
     is_granted: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     ip_address: Mapped[Optional[str]] = mapped_column(String(45))
     user_agent: Mapped[Optional[str]] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
     user: Mapped["User"] = relationship("User", back_populates="consents")
     consent_type: Mapped["ConsentType"] = relationship("ConsentType", back_populates="user_consents")
@@ -208,7 +208,7 @@ class LoginAttempt(Base, UUIDPrimaryKeyMixin):
 class AdminAction(Base, UUIDPrimaryKeyMixin):
     """Tracks administrative actions."""
     __tablename__ = "admin_actions"
-    __table_args__ = {"schema": "audit"}
+    __table_args__ = {"schema": "system"}
 
     actor_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),

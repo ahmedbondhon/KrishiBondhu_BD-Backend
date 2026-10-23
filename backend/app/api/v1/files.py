@@ -136,7 +136,10 @@ async def confirm_upload(
     """
     # Storage path validation: ensure path was issued to this user
     user_id_str = str(current_user.id)
-    if user_id_str not in payload.storage_path:
+    # Reject directory traversal attempts and ensure strict user segment prefix
+    norm_path = payload.storage_path.replace("\\", "/").strip("/")
+    path_segments = norm_path.split("/")
+    if ".." in path_segments or "." in path_segments or len(path_segments) < 2 or path_segments[1] != user_id_str:
         return error_response(
             message="Invalid storage path for current user",
             error_code="FORBIDDEN_STORAGE_PATH",

@@ -297,7 +297,6 @@ async def delete_diagnosis_case(
     await diagnosis_service.delete_case_with_cleanup(
         db, case_id, current_user.id, user_role=user_role, background_tasks=background_tasks
     )
-    await db.commit()
     return success_response(
         data={"case_id": str(case_id), "status": "deleted"},
         message="কেসটি সফলভাবে মুছে ফেলা হয়েছে এবং স্টোরেজ ক্লিনআপ শুরু হয়েছে।",

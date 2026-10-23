@@ -532,16 +532,14 @@ class AuthService:
         loc_granted: bool = False,
         ip: str | None = None,
         ua: str | None = None,
-        location_permission_granted: bool | None = None,
-        ip_address: str | None = None,
-        user_agent: str | None = None,
+        **kwargs,
     ) -> None:
-        if location_permission_granted is not None:
-            loc_granted = location_permission_granted
-        if ip_address is not None:
-            ip = ip_address
-        if user_agent is not None:
-            ua = user_agent
+        if kwargs.get("location_permission_granted") is not None:
+            loc_granted = kwargs["location_permission_granted"]
+        if kwargs.get("ip_address") is not None:
+            ip = kwargs["ip_address"]
+        if kwargs.get("user_agent") is not None:
+            ua = kwargs["user_agent"]
         default_role = "11000000-0000-0000-0000-000000000002" if role_code == "expert" else "11000000-0000-0000-0000-000000000001"
         sb_payload = {
             "id": str(user.id),

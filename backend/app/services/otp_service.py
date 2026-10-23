@@ -139,7 +139,7 @@ class OtpService:
         )
 
     def consume_verification_token(self, token: str) -> None:
-        """Mark token as consumed to prevent replay attacks (Bug 2.1)."""
+        """Mark token as consumed in DB and memory to prevent replay attacks (Bug 2.1 & Bug 04)."""
         try:
             payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
             jti = payload.get("jti")
@@ -148,6 +148,8 @@ class OtpService:
             otp_id = payload.get("otp_id")
             if otp_id:
                 _consumed_verification_tokens.add(otp_id)
+                # Fire and forget task to mark OTP record consumed in DB
+                _safe_create_task(self.repo.mark_otp_consumed(uuid.UUID(otp_id)))
         except Exception:
             pass
         _consumed_verification_tokens.add(token)
@@ -184,12 +186,14 @@ class OtpService:
         phone = normalize_bd_phone(phone_number)
         win = settings.otp_rate_limit_window_minutes
 
-        if not settings.otp_demo_mode:
-            if await self.repo.count_recent_otps_for_phone(phone, window_minutes=win) >= settings.otp_rate_limit_per_phone:
-                self._raise_rate_limit("phone")
+        max_phone_attempts = settings.otp_rate_limit_per_phone if not settings.otp_demo_mode else 30
+        max_ip_attempts = settings.otp_rate_limit_per_ip if not settings.otp_demo_mode else 100
 
-            if ip_address and not ip_rate_limiter.check_and_record(ip_address, settings.otp_rate_limit_per_ip, win):
-                self._raise_rate_limit("IP")
+        if await self.repo.count_recent_otps_for_phone(phone, window_minutes=win) >= max_phone_attempts:
+            self._raise_rate_limit("phone")
+
+        if ip_address and not ip_rate_limiter.check_and_record(ip_address, max_ip_attempts, win):
+            self._raise_rate_limit("IP")
 
         otp_code = settings.otp_demo_code if settings.otp_demo_mode else generate_numeric_otp(settings.otp_length)
         expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.otp_expire_minutes)

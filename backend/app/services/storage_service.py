@@ -62,6 +62,11 @@ class StorageService:
         if self._s3_client is None:
             with self._lock:
                 if self._s3_client is None:
+                    if boto3 is None or Config is None:
+                        raise ImportError(
+                            "The 'boto3' and 'botocore' libraries are required for S3 storage operations. "
+                            "Please install them via 'pip install boto3'."
+                        )
                     if settings.storage_provider == "supabase":
                         project_ref = settings.supabase_project_ref
                         if not project_ref and settings.supabase_url:
@@ -202,6 +207,23 @@ class StorageService:
         """
         import asyncio
         return await asyncio.to_thread(self._check_file_exists_sync, storage_path)
+    def _get_file_bytes_sync(self, storage_path: str, bucket_name: Optional[str] = None) -> Optional[bytes]:
+        try:
+            client = self._get_s3_client()
+            bucket = bucket_name or settings.storage_bucket_name
+            resp = client.get_object(
+                Bucket=bucket,
+                Key=storage_path.lstrip("/"),
+            )
+            return resp["Body"].read()
+        except Exception:
+            return None
+
+    async def get_file_bytes(self, storage_path: str, bucket_name: Optional[str] = None) -> Optional[bytes]:
+        """Fetch raw bytes of a file from object storage."""
+        import asyncio
+        return await asyncio.to_thread(self._get_file_bytes_sync, storage_path, bucket_name)
+
     def _delete_file_sync(self, storage_path: str, bucket_name: Optional[str] = None) -> bool:
         try:
             client = self._get_s3_client()

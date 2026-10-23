@@ -125,7 +125,7 @@ class DiagnosisService:
                     detail={"code": "PLOT_NOT_FOUND", "message_bn": "নির্দিষ্ট জমিটি পাওয়া যায়নি বা এই জমিটি আপনার নয়।"},
                 )
 
-        # 2. Validate plot_crop_id matches plot and crop
+        # 2. Validate plot_crop_id matches plot and crop and belongs to farmer
         if payload.plot_crop_id:
             plot_crop_res = await db.execute(
                 select(PlotCrop).where(
@@ -138,6 +138,13 @@ class DiagnosisService:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail={"code": "PLOT_CROP_NOT_FOUND", "message_bn": "ফসলের চক্রটি পাওয়া যায়নি।"},
+                )
+            # Ensure plot belongs to the farmer
+            crop_plot = await db.get(Plot, plot_crop.plot_id)
+            if not crop_plot or crop_plot.is_deleted or (crop_plot.user_id != farmer_id and user_role not in ("admin", "administrator", "tech_admin", "agent")):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"code": "FORBIDDEN", "message_bn": "অন্য কৃষকের জমির ফসল চক্র ব্যবহারের অনুমতি নেই।"},
                 )
             if (payload.plot_id and plot_crop.plot_id != payload.plot_id) or (plot_crop.crop_id != payload.crop_id):
                 raise HTTPException(
@@ -511,27 +518,27 @@ class DiagnosisService:
             # Explicitly commit all analysis results, predictions, and advisories to the DB
             await db.commit()
         except HTTPException:
-            await db.rollback()
+            if db.in_transaction():
+                await db.rollback()
+            case.status = "submitted"
             try:
-                await self._update_status(
-                    db, case, "submitted",
-                    changed_by=farmer_id,
-                    notes="AI analysis failed or rolled back"
-                )
-                await db.commit()
+                case_refresh = await db.get(DiagnosisCase, case.id)
+                if case_refresh:
+                    case_refresh.status = "submitted"
+                    await db.commit()
             except Exception:
                 pass
             raise
         except Exception as e:
-            # Bug 1.1: Reset case status to submitted so it does not get stuck in processing
-            await db.rollback()
+            # Reset case status to submitted so it does not get stuck in processing
+            if db.in_transaction():
+                await db.rollback()
+            case.status = "submitted"
             try:
-                await self._update_status(
-                    db, case, "submitted",
-                    changed_by=farmer_id,
-                    notes=f"AI analysis failed or rolled back: {str(e)}"
-                )
-                await db.commit()
+                case_refresh = await db.get(DiagnosisCase, case.id)
+                if case_refresh:
+                    case_refresh.status = "submitted"
+                    await db.commit()
             except Exception:
                 pass
             raise HTTPException(
@@ -953,12 +960,12 @@ class DiagnosisService:
         """
         case = await self._get_case_for_farmer(db, case_id, farmer_id, user_role=user_role)
 
-        if case.status not in ("submitted", "ai_analyzed"):
+        if case.status not in ("ai_analyzed", "analyzed"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
                     "code": "INVALID_CASE_STATUS",
-                    "message_bn": "শুধুমাত্র বিশ্লেষণ করা কেস বিশেষজ্ঞ পর্যালোচনার জন্য অনুরোধ করা যাবে।",
+                    "message_bn": "শুধুমাত্র AI বিশ্লেষণ সম্পন্ন কেস বিশেষজ্ঞ পর্যালোচনার জন্য অনুরোধ করা যাবে।",
                 },
             )
 

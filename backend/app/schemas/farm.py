@@ -6,7 +6,7 @@ Pydantic v2 schemas for farm and crop cycle endpoints.
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -93,7 +93,9 @@ class UpdatePlotCropRequest(BaseModel):
     current_stage_id: Optional[UUID] = Field(None, description="Current growth stage ID")
     expected_harvest_date: Optional[date] = None
     actual_harvest_date: Optional[date] = None
-    status: Optional[str] = Field(None, description="planned | active | harvested | failed")
+    status: Optional[Literal["planned", "active", "harvested", "failed"]] = Field(
+        None, description="planned | active | harvested | failed"
+    )
     yield_kg: Optional[Decimal] = Field(None, ge=0, description="Actual yield in kilograms")
     notes: Optional[str] = None
 

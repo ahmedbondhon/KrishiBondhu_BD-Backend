@@ -184,17 +184,22 @@ async def predict_crop_disease(payload: CropDiagnosisPredictRequest, request: Re
             image_bytes = base64.b64decode(payload.image_base64)
             mime = payload.image_mime_type or "image/jpeg"
 
-            response = _gemini_client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=[
-                    DIAGNOSIS_PROMPT,
-                    genai_types.Part.from_bytes(data=image_bytes, mime_type=mime),
-                ],
-                config=genai_types.GenerateContentConfig(
-                    temperature=0.1,
-                    max_output_tokens=1024,
-                ),
-            )
+            import asyncio
+
+            def _call_gemini_predict():
+                return _gemini_client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=[
+                        DIAGNOSIS_PROMPT,
+                        genai_types.Part.from_bytes(data=image_bytes, mime_type=mime),
+                    ],
+                    config=genai_types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=1024,
+                    ),
+                )
+
+            response = await asyncio.to_thread(_call_gemini_predict)
 
             result = _parse_gemini_response(response.text)
             processing_ms = int((time.monotonic() - start) * 1000)

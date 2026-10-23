@@ -18,6 +18,24 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 
+class Market(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """
+    market.markets — Local markets / haats registry table.
+    """
+    __tablename__ = "markets"
+    __table_args__ = {"schema": "market"}
+
+    name_en: Mapped[str] = mapped_column(String(150), nullable=False)
+    name_bn: Mapped[str] = mapped_column(String(150), nullable=False)
+    market_type: Mapped[str] = mapped_column(String(50), default="haat", nullable=False)
+    division_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("geo.divisions.id", ondelete="SET NULL"))
+    district_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("geo.districts.id", ondelete="SET NULL"))
+    upazila_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("geo.upazilas.id", ondelete="SET NULL"))
+    union_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("geo.unions.id", ondelete="SET NULL"))
+    operating_days: Mapped[Optional[str]] = mapped_column(String(100))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+
 class GroupSellingOffer(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
     market.group_selling_offers — HaatDor produce aggregation offers.
@@ -76,9 +94,9 @@ class OfferParticipant(Base, UUIDPrimaryKeyMixin):
     offered_quantity_kg: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False)
     agreed_price_per_kg_bdt: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2))
     status: Mapped[str] = mapped_column(String(50), default="pledged", nullable=False)
-    pledged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    pledged_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False
     )
 
     offer: Mapped["GroupSellingOffer"] = relationship("GroupSellingOffer", back_populates="participants")

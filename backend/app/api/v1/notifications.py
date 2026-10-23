@@ -52,13 +52,12 @@ async def list_notifications(
     query = (
         select(Notification)
         .where(Notification.user_id == current_user.id)
-        .order_by(Notification.created_at.desc())
-        .limit(limit)
-        .offset(offset)
     )
 
     if unread_only:
         query = query.where(Notification.is_read == False)
+
+    query = query.order_by(Notification.created_at.desc()).limit(limit).offset(offset)
 
     result = await db.execute(query)
     notifications = result.scalars().all()
