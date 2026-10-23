@@ -32,25 +32,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.security import verify_access_token
-from app.db.session import async_session_factory
+from app.db.session import async_session_factory, get_db
 from app.models.auth import User
 
-# ─────────────────────────────────────────────────────────
-# Database Session
-# ─────────────────────────────────────────────────────────
-
-async def get_db() -> AsyncSession:  # type: ignore[return]
-    """
-    Provide a scoped database session for a single request.
-    Commits on success and rolls back on exception.
-    """
-    async with async_session_factory() as session:
-        try:
-            yield session
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
 
 
 # ─────────────────────────────────────────────────────────

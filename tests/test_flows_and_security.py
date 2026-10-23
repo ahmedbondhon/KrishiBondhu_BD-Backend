@@ -34,6 +34,12 @@ def clean_inbox_and_rate_limiters():
     """Reset in-memory state before each test."""
     sms_inbox._store.clear()
     ip_rate_limiter._store.clear()
+    mock_db = AsyncMock()
+    async def override():
+        yield mock_db
+    app.dependency_overrides[get_db] = override
+    yield
+    app.dependency_overrides.pop(get_db, None)
 
 
 @pytest_asyncio.fixture

@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -286,17 +286,22 @@ async def get_expert_cases(
     Returns all cases with status='escalated', prioritized by urgency.
     Experts see cases assigned to them (or unassigned if admin).
     """
-    result = await db.execute(
-        select(DiagnosisCase)
-        .where(
-            DiagnosisCase.status == "escalated",
-            DiagnosisCase.is_deleted == False,
-        )
-        .order_by(
-            DiagnosisCase.urgency_level.desc(),
-            DiagnosisCase.created_at.asc(),
-        )
+    query = select(DiagnosisCase).where(
+        DiagnosisCase.status == "escalated",
+        DiagnosisCase.is_deleted == False,
     )
+    if current_user.role_code == "expert":
+        query = query.where(
+            or_(
+                DiagnosisCase.assigned_expert_id == current_user.id,
+                DiagnosisCase.assigned_expert_id.is_(None),
+            )
+        )
+    query = query.order_by(
+        DiagnosisCase.urgency_level.desc(),
+        DiagnosisCase.created_at.asc(),
+    )
+    result = await db.execute(query)
     cases = result.scalars().all()
 
     return success_response(

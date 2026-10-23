@@ -15,7 +15,7 @@ Usage:
 """
 
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -48,7 +48,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_access_token_expire_minutes: int = 60
     jwt_refresh_token_expire_days: int = 30
-
+    farmer_pin_min_len: int = 6
+    privileged_password_min_len: int = 8
     # --- Object Storage ---
     storage_provider: str = "supabase"         # 'supabase' | 's3' | 'cloudinary'
     storage_bucket_name: str = "krishibondhu-uploads"
@@ -56,6 +57,37 @@ class Settings(BaseSettings):
     upload_dir: str = "uploads"
     max_file_size_bytes: int = 2 * 1024 * 1024
     public_base_url: str = "http://localhost:8000"
+
+    enable_supabase_auth_fallback: bool = True
+    access_token_expire_minutes: int = 30
+    refresh_token_expire_days: int = 7
+    remember_me_refresh_token_expire_days: int = 30
+    max_login_attempts: int = 5
+    login_lockout_minutes: int = 15
+
+    # --- OTP & SMS ---
+    otp_length: int = 6
+    otp_expire_minutes: int = 5
+    otp_mock_sms: bool = True
+    sms_api_key: Optional[str] = None
+    sms_sender_id: Optional[str] = None
+    otp_hmac_secret: str = "change-me-otp-hmac-secret"
+    otp_max_verify_attempts: int = 5
+    otp_demo_mode: bool = True
+    otp_demo_code: str = "123456"
+    sms_mode: str = "simulator"
+    otp_rate_limit_per_phone: int = 3
+    otp_rate_limit_per_ip: int = 10
+    otp_rate_limit_window_minutes: int = 10
+
+    # --- Support & Helpline ---
+    support_helpline: str = "16123"
+    support_phone: str = "+8809612345678"
+    support_email: str = "support@krishibondhu.gov.bd"
+    support_available_hours_bn: str = "সকাল ৯:০০ - সন্ধ্যা ৬:০০ (শনিবার থেকে বৃহস্পতিবার)"
+    support_available_hours_en: str = "9:00 AM - 6:00 PM (Saturday to Thursday)"
+    display_timezone: str = "Asia/Dhaka"
+    app_env: str = "development"
 
 
 

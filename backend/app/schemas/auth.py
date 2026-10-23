@@ -11,17 +11,39 @@ All schemas use `model_config = ConfigDict(from_attributes=True)` to allow
 direct creation from SQLAlchemy ORM model instances (replaces Pydantic v1's `orm_mode`).
 """
 
-from typing import Any, Literal, Optional
+from datetime import datetime
+from typing import Any, Literal, Optional, Union
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-
-# ─────────────────────────────────────────────────────────
-# Registration & Login
-# ─────────────────────────────────────────────────────────
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.core.security import normalize_bd_phone
+
+
+def get_dashboard_path_for_role(role: str) -> str:
+    """Map role code to frontend dashboard redirect path.
+
+    - farmer -> /dashboard
+    - agent -> /agent/dashboard
+    - expert -> /expert/dashboard
+    - administrator -> /admin/dashboard
+    """
+    mapping = {
+        "farmer": "/dashboard",
+        "agent": "/agent/dashboard",
+        "expert": "/expert/dashboard",
+        "administrator": "/admin/dashboard",
+        "admin": "/admin/dashboard",
+        "technical_admin": "/admin/dashboard",
+    }
+    return mapping.get(role, "/dashboard")
 
 
 class RegisterRequest(BaseModel):
@@ -38,15 +60,26 @@ class RegisterRequest(BaseModel):
 
 
 class LoginRequest(BaseModel):
-    """POST /api/v1/auth/login — Login with phone number and password."""
-    phone_number: str = Field(..., description="Registered phone number")
+    """POST /api/v1/auth/login — Login with phone number (or email) and password."""
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    phone_number: Optional[str] = Field(default=None, description="Registered phone number")
+    email: Optional[EmailStr] = Field(default=None, description="Registered email")
     password: str = Field(..., min_length=1)
+    remember_me: bool = Field(default=False)
 
     @field_validator("phone_number", mode="before")
     @classmethod
-    def normalize_phone(cls, v: Any) -> str:
+    def normalize_phone(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return None
         return normalize_bd_phone(v)
 
+    @model_validator(mode="after")
+    def require_identifier(self):
+        if not self.phone_number and not self.email:
+            raise ValueError("Either phone_number or email is required")
+        return self
 
 
 class RefreshTokenRequest(BaseModel):
@@ -54,44 +87,68 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str
 
 
-# ─────────────────────────────────────────────────────────
-# Token Responses
-# ─────────────────────────────────────────────────────────
-
 class TokenResponse(BaseModel):
     """Returned on successful login or token refresh."""
     access_token: str
     refresh_token: str
     token_type: str = "Bearer"
-    expires_in_minutes: int
+    expires_in_minutes: Optional[int] = None
+    expires_in: Optional[int] = None
+    user: Optional[Any] = None
+    dashboard_path: Optional[str] = None
 
+    @model_validator(mode="after")
+    def populate_expires(self):
+        if self.expires_in_minutes is not None and self.expires_in is None:
+            self.expires_in = self.expires_in_minutes * 60
+        elif self.expires_in is not None and self.expires_in_minutes is None:
+            self.expires_in_minutes = self.expires_in // 60
+        if not self.dashboard_path and self.user:
+            role = getattr(self.user, "role", None)
+            if role:
+                role_str = role.code if hasattr(role, "code") else str(role)
+                self.dashboard_path = get_dashboard_path_for_role(role_str)
+        return self
 
-# ─────────────────────────────────────────────────────────
-# User Profile
-# ─────────────────────────────────────────────────────────
 
 class RoleResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-    id: UUID
+    id: Optional[UUID] = None
     code: str
     name: str
 
 
 class UserResponse(BaseModel):
-    """Returned by GET /api/v1/auth/me and registration."""
+    """Public user representation returned by API."""
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    phone_number: str
     full_name: str
-    role: RoleResponse
-    preferred_language: str
+    phone_number: str
+    email: Optional[str] = None
+    role: Union[RoleResponse, str] = Field(description="Role code or object")
+    status: Optional[str] = "active"
+    preferred_language: str = "bn"
+    preferred_communication: Optional[str] = Field(default="sms", description="Preferred channel: sms, call, in_app")
     avatar_url: Optional[str] = None
     division_id: Optional[UUID] = None
     district_id: Optional[UUID] = None
     upazila_id: Optional[UUID] = None
     union_id: Optional[UUID] = None
-    is_active: bool
+    village: Optional[str] = None
+    phone_verified: Optional[bool] = True
+    email_verified: Optional[bool] = False
+    is_active: bool = True
+    last_login_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    dashboard_path: str = Field(default="/dashboard", description="Role-based frontend redirect dashboard path")
+
+    @model_validator(mode="after")
+    def set_dashboard_path(self):
+        role_str = self.role.code if isinstance(self.role, RoleResponse) else str(self.role)
+        if role_str:
+            self.dashboard_path = get_dashboard_path_for_role(role_str)
+        return self
 
 
 class UpdateProfileRequest(BaseModel):
@@ -103,3 +160,508 @@ class UpdateProfileRequest(BaseModel):
     union_id: Optional[UUID] = None
     preferred_language: Optional[str] = Field(None, pattern="^(bn|en)$")
     avatar_url: Optional[str] = None
+# ============================================================================
+# KrishiBondhu Bangladesh — Auth & Geo Pydantic Schemas
+# Request/Response DTOs for multi-step registration, OTP, login, and support
+# ============================================================================
+
+import re
+import uuid
+from datetime import datetime
+from typing import Literal, Optional
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+from app.core.config import get_settings
+from app.core.security import normalize_bd_phone
+
+# --------------------------------------------------------------------------
+# Constants & Validators
+# --------------------------------------------------------------------------
+OtpPurposeType = Literal["registration", "login", "reset_password"]
+PreferredCommunicationType = Literal["sms", "call", "in_app"]
+
+BD_LOCAL_REGEX = re.compile(r"^01[3-9]\d{8}$")
+
+
+def validate_bd_phone(phone: Any) -> str:
+    """Validate and return 11-digit local format 01XXXXXXXXX."""
+    if not phone or not isinstance(phone, str):
+        raise ValueError("Phone number must be a non-empty string.")
+
+    cleaned = phone.strip().replace(" ", "").replace("-", "")
+    if cleaned.startswith("+88"):
+        cleaned = cleaned[3:]
+    elif cleaned.startswith("88"):
+        cleaned = cleaned[2:]
+
+    if not BD_LOCAL_REGEX.match(cleaned):
+        raise ValueError(
+            "Invalid Bangladesh phone number. Expected 11 digits starting with 013-019"
+        )
+    return cleaned
+
+
+
+# =========================================================================
+# Step 1: OTP Request & Verification Schemas
+# =========================================================================
+
+class SendOtpRequest(BaseModel):
+    """Request to generate and send an OTP code to a phone number."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    phone_number: str = Field(..., examples=["01712345678"])
+    purpose: OtpPurposeType = Field(default="registration", examples=["registration"])
+
+    @field_validator("phone_number")
+    @classmethod
+    def check_phone(cls, v: str) -> str:
+        return validate_bd_phone(v)
+
+
+class SendOtpResponse(BaseModel):
+    """Response returned when an OTP is sent.
+
+    SECURITY: OTP code is NEVER returned in the response.
+    Use the SMS simulator popup in the frontend demo to see it.
+    """
+
+    message: str
+    phone_number: str
+    purpose: str
+    expires_in_seconds: int
+    resend_after: int = Field(
+        default=60,
+        description="Seconds to wait before requesting another OTP",
+    )
+    demo_mode: Optional[bool] = Field(
+        default=None,
+        description="True if demo OTP mode is enabled on the server",
+    )
+
+
+class VerifyOtpRequest(BaseModel):
+    """Verify submitted OTP code for a given phone and purpose."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    phone_number: str = Field(..., examples=["01712345678"])
+    otp_code: str = Field(..., min_length=4, max_length=10, examples=["123456"])
+    purpose: OtpPurposeType = Field(default="registration")
+
+    @field_validator("phone_number")
+    @classmethod
+    def check_phone(cls, v: str) -> str:
+        return validate_bd_phone(v)
+
+
+class VerifyOtpResponse(BaseModel):
+    """Response returned when an OTP is successfully verified."""
+
+    message: str
+    phone_number: str
+    is_verified: bool
+    verification_token: str = Field(
+        description="Signed token proving phone ownership for multi-step registration or password reset"
+    )
+
+
+def validate_farmer_pin(pin: str) -> str:
+    """Password policy for farmers:
+    - Numeric PIN only (digits 0-9)
+    - Minimum length 6 (FARMER_PIN_MIN_LEN from config)
+    """
+    min_len = get_settings().farmer_pin_min_len
+    if not pin.isdigit():
+        raise ValueError("Farmer PIN must contain only numeric digits (0-9).")
+    if len(pin) < min_len:
+        raise ValueError(f"Farmer PIN must be at least {min_len} digits.")
+    return pin
+
+
+def validate_strong_password(password: str, role_name: str = "This role") -> str:
+    """Password policy for privileged roles (Admin, Expert, Agent):
+    - Minimum 8 characters (PRIVILEGED_PASSWORD_MIN_LEN from config)
+    - At least one uppercase letter (A-Z)
+    - At least one lowercase letter (a-z)
+    - At least one digit (0-9)
+    """
+    min_len = get_settings().privileged_password_min_len
+    if len(password) < min_len:
+        raise ValueError(f"{role_name} password must be at least {min_len} characters long.")
+    if not re.search(r"[A-Z]", password):
+        raise ValueError(f"{role_name} password must contain at least one uppercase letter (A-Z).")
+    if not re.search(r"[a-z]", password):
+        raise ValueError(f"{role_name} password must contain at least one lowercase letter (a-z).")
+    if not re.search(r"[0-9]", password):
+        raise ValueError(f"{role_name} password must contain at least one digit (0-9).")
+    return password
+
+
+# =========================================================================
+# Step 2 & 3: Registration Schemas
+# =========================================================================
+
+class FarmerAgentRegisterRequest(BaseModel):
+    """Multi-step registration for farmer and agent roles."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    # Step 1: Mobile & Security
+    phone_number: str = Field(..., examples=["01712345678"])
+    otp_code: Optional[str] = Field(
+        default=None,
+        description="Direct OTP code entered, or verification_token from Step 1 verify",
+    )
+    verification_token: Optional[str] = Field(
+        default=None,
+        description="Signed verification token obtained from /auth/otp/verify",
+    )
+    password: str = Field(
+        ...,
+        min_length=6,
+        max_length=128,
+        description="Numeric PIN (min 6 digits) for farmers, or min 8 chars strong password for agents",
+        examples=["123456"],
+    )
+
+    # Step 2: Personal & Role Details
+    full_name: str = Field(..., min_length=2, max_length=150, examples=["মো. আব্দুর রহিম"])
+    role: str = Field(default="farmer", examples=["farmer"])
+    email: Optional[EmailStr] = Field(default=None, examples=["rahim@example.com"])
+
+    # Step 2: Geographic Data
+    division_id: Optional[uuid.UUID] = Field(default=None)
+    district_id: Optional[uuid.UUID] = Field(default=None)
+    upazila_id: Optional[uuid.UUID] = Field(default=None)
+    union_id: Optional[uuid.UUID] = Field(default=None)
+    village: Optional[str] = Field(default=None, max_length=200, examples=["দরিরামপুর"])
+
+    # Fallback string fields if client sends text names
+    district: Optional[str] = Field(default=None, max_length=100)
+    upazila: Optional[str] = Field(default=None, max_length=100)
+
+    # Preferences & Profile Media
+    preferred_language: str = Field(default="bn", examples=["bn"])
+    preferred_communication: PreferredCommunicationType = Field(
+        default="sms",
+        description="Preferred communication channel: sms, call, or in_app",
+        examples=["sms"],
+    )
+    avatar_url: Optional[str] = Field(default=None, examples=["https://example.com/avatar.jpg"])
+
+    # Step 3: Consents
+    terms_accepted: bool = Field(
+        default=True,
+        description="Must be True to accept Terms of Service",
+    )
+    privacy_accepted: Optional[bool] = Field(
+        default=None,
+        description="Must be True to accept Privacy Policy (defaults to terms_accepted if omitted)",
+    )
+    location_permission_granted: bool = Field(
+        default=False,
+        description="User consent for GPS location tracking for weather & disease forecasts",
+    )
+
+    @field_validator("phone_number")
+    @classmethod
+    def check_phone(cls, v: str) -> str:
+        return validate_bd_phone(v)
+
+    @field_validator("role")
+    @classmethod
+    def check_role(cls, v: str) -> str:
+        allowed = {"farmer", "agent", "expert"}
+        if v not in allowed:
+            raise ValueError(f"Self-registration allowed only for: {', '.join(allowed)}")
+        return v
+
+    @field_validator("preferred_language")
+    @classmethod
+    def check_language(cls, v: str) -> str:
+        if v not in {"bn", "en"}:
+            raise ValueError("Preferred language must be 'bn' (Bangla) or 'en' (English)")
+        return v
+
+    @model_validator(mode="after")
+    def check_role_password_policy(self):
+        if self.privacy_accepted is None:
+            self.privacy_accepted = self.terms_accepted
+        if self.role == "agent":
+            validate_strong_password(self.password, "Agent")
+        elif self.role == "farmer":
+            validate_farmer_pin(self.password)
+        return self
+
+
+class ExpertRegisterRequest(BaseModel):
+    """Registration for expert role — requires qualifications and admin approval."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    phone_number: str = Field(..., examples=["01912345678"])
+    otp_code: Optional[str] = Field(default=None)
+    verification_token: Optional[str] = Field(default=None)
+    password: str = Field(..., min_length=8, max_length=128)
+    full_name: str = Field(..., min_length=2, max_length=150, examples=["ড. আব্দুল করিম"])
+    email: EmailStr = Field(..., examples=["karim@bari.gov.bd"])
+    specialization: str = Field(..., max_length=200, examples=["Plant Pathology"])
+    credentials: str = Field(..., max_length=500, examples=["PhD in Agriculture, BARI"])
+    preferred_language: str = Field(default="bn")
+    preferred_communication: PreferredCommunicationType = Field(
+        default="sms",
+        description="Preferred communication channel: sms, call, or in_app",
+        examples=["sms"],
+    )
+    terms_accepted: bool = Field(default=True)
+    privacy_accepted: Optional[bool] = Field(default=None)
+    location_permission_granted: bool = Field(default=False)
+
+    @model_validator(mode="after")
+    def default_expert_privacy(self):
+        if self.privacy_accepted is None:
+            self.privacy_accepted = self.terms_accepted
+        return self
+
+    @field_validator("phone_number")
+    @classmethod
+    def check_phone(cls, v: str) -> str:
+        return validate_bd_phone(v)
+
+    @field_validator("password")
+    @classmethod
+    def check_expert_password(cls, v: str) -> str:
+        return validate_strong_password(v, "Expert")
+
+
+class AdminCreateUserRequest(BaseModel):
+    """Admin-only user creation."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    full_name: str = Field(..., min_length=2, max_length=150)
+    email: EmailStr = Field(...)
+    phone_number: str = Field(...)
+    password: str = Field(..., min_length=8, max_length=128)
+    role: str = Field(..., examples=["admin", "administrator"])
+
+    @field_validator("phone_number")
+    @classmethod
+    def check_phone(cls, v: str) -> str:
+        return validate_bd_phone(v)
+
+    @field_validator("password")
+    @classmethod
+    def check_admin_password(cls, v: str) -> str:
+        return validate_strong_password(v, "Admin")
+
+    @field_validator("role")
+    @classmethod
+    def check_role(cls, v: str) -> str:
+        allowed = {"administrator", "technical_admin", "admin"}
+        if v not in allowed:
+            raise ValueError(f"Admin creation only for: {', '.join(allowed)}")
+        return v
+
+
+# =========================================================================
+# Login Schemas (Password/PIN + Passwordless OTP)
+# =========================================================================
+
+
+
+class OtpLoginRequest(BaseModel):
+    """Request OTP for passwordless login."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    phone_number: str = Field(..., examples=["01712345678"])
+
+    @field_validator("phone_number")
+    @classmethod
+    def check_phone(cls, v: str) -> str:
+        return validate_bd_phone(v)
+
+
+class OtpLoginVerifyRequest(BaseModel):
+    """Verify OTP and complete passwordless login."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    phone_number: str = Field(..., examples=["01712345678"])
+    otp_code: str = Field(..., min_length=4, max_length=10, examples=["123456"])
+    remember_me: bool = Field(default=False)
+
+    @field_validator("phone_number")
+    @classmethod
+    def check_phone(cls, v: str) -> str:
+        return validate_bd_phone(v)
+
+
+# =========================================================================
+# Password Reset (Forgot Password) Schemas
+# =========================================================================
+
+class ForgotPasswordRequest(BaseModel):
+    """Request OTP to reset password or PIN."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    phone_number: str = Field(..., examples=["01712345678"])
+
+    @field_validator("phone_number")
+    @classmethod
+    def check_phone(cls, v: str) -> str:
+        return validate_bd_phone(v)
+
+
+class ResetPasswordRequest(BaseModel):
+    """Reset password or PIN using verified OTP or verification token."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    phone_number: str = Field(..., examples=["01712345678"])
+    otp_code: Optional[str] = Field(default=None, examples=["123456"])
+    verification_token: Optional[str] = Field(default=None)
+    new_password: str = Field(
+        ...,
+        min_length=6,
+        max_length=128,
+        description="New password (min 8 chars strong for privileged roles) or numeric PIN (min 6 digits for farmers)",
+    )
+
+    @field_validator("phone_number")
+    @classmethod
+    def check_phone(cls, v: str) -> str:
+        return validate_bd_phone(v)
+
+    @field_validator("new_password")
+    @classmethod
+    def check_password_strength(cls, v: str) -> str:
+        min_len = get_settings().farmer_pin_min_len
+        if len(v) < min_len:
+            raise ValueError(f"New password/PIN must be at least {min_len} characters/digits.")
+        return v
+
+
+# =========================================================================
+# Preferences & Language
+# =========================================================================
+
+class UpdateLanguageRequest(BaseModel):
+    """Toggle language preference between Bangla (bn) and English (en)."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    preferred_language: str = Field(..., examples=["bn"])
+
+    @field_validator("preferred_language")
+    @classmethod
+    def check_language(cls, v: str) -> str:
+        if v not in {"bn", "en"}:
+            raise ValueError("preferred_language must be 'bn' or 'en'")
+        return v
+
+
+# =========================================================================
+# Response DTOs
+# =========================================================================
+
+
+
+class UserDetailResponse(UserResponse):
+    """Extended user detail (admin view)."""
+
+    is_active: bool
+    is_deleted: bool
+    updated_at: Optional[datetime] = None
+
+
+
+
+class LogoutRequest(BaseModel):
+    """Request to revoke a refresh token on logout."""
+
+    refresh_token: str
+
+
+class RegisterResponse(BaseModel):
+    """Response returned after successful registration."""
+
+    message: str
+    user: UserResponse
+    tokens: Optional[TokenResponse] = None
+    dashboard_path: Optional[str] = Field(default=None, description="Role-based frontend dashboard redirect path")
+
+    @model_validator(mode="after")
+    def set_dashboard_path(self):
+        if not self.dashboard_path and self.user and self.user.role:
+            self.dashboard_path = get_dashboard_path_for_role(self.user.role)
+        return self
+
+
+class MessageResponse(BaseModel):
+    """Generic message response."""
+
+    message: str
+
+
+class MeResponse(UserResponse):
+    """Current authenticated user profile."""
+    pass
+
+
+class SupportContactResponse(BaseModel):
+    """Helpline & Call Support information."""
+
+    helpline_number: str = Field(description="Shortcode helpline (e.g., 16123)")
+    support_phone: str = Field(description="Direct phone support number")
+    support_email: str = Field(description="Official support email")
+    available_hours_bn: str
+    available_hours_en: str
+    call_center_role: str = "agent"
+    title_bn: str = "কৃষিবন্ধু সহায়তা ও কল সেন্টার"
+    title_en: str = "KrishiBondhu Support & Call Center"
+    instructions_bn: str = "যে কোনো কারিগরি বা কৃষি পরামর্শের জন্য সরাসরি কল সেন্টারে যোগাযোগ করুন।"
+    instructions_en: str = "For any technical or agricultural advisory, contact our call center directly."
+
+
+# =========================================================================
+# Geo Dropdown Responses
+# =========================================================================
+
+class GeoItem(BaseModel):
+    """Geographic entity representation for cascading dropdowns."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    bbs_code: str
+    name_en: str
+    name_bn: str
+
+
+class DivisionResponse(GeoItem):
+    pass
+
+
+class DistrictResponse(GeoItem):
+    division_id: uuid.UUID
+
+
+class UpazilaResponse(GeoItem):
+    district_id: uuid.UUID
+
+
+class UnionResponse(GeoItem):
+    upazila_id: uuid.UUID

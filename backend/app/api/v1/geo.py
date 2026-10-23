@@ -11,18 +11,33 @@ Routes:
   GET /api/v1/geo/unions?upazila_id=...
 """
 
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.dependencies import get_db
-from app.core.responses import success_response
-from app.models.geo import District, Division, Union, Upazila
+from app.repositories.auth import AuthRepository
 
 router = APIRouter(prefix="/geo", tags=["Geographic Hierarchy"])
+
+
+def _format_geo(item: Any, extra_fields: list[str] | None = None) -> dict:
+    if isinstance(item, dict):
+        return item
+    data = {
+        "id": str(item.id),
+        "bbs_code": item.bbs_code,
+        "name_en": item.name_en,
+        "name_bn": item.name_bn,
+    }
+    if extra_fields:
+        for f in extra_fields:
+            if hasattr(item, f):
+                val = getattr(item, f)
+                data[f] = str(val) if val is not None else None
+    return data
 
 
 @router.get("/divisions", summary="List all administrative divisions")
@@ -30,23 +45,9 @@ async def list_divisions(
     db: AsyncSession = Depends(get_db),
 ):
     """Returns all active divisions in Bangladesh (e.g. Rajshahi, Khulna, Dhaka)."""
-    result = await db.execute(
-        select(Division).where(Division.is_active == True).order_by(Division.name_bn)
-    )
-    divisions = result.scalars().all()
-
-    return success_response(
-        data=[
-            {
-                "id": str(d.id),
-                "bbs_code": d.bbs_code,
-                "name_en": d.name_en,
-                "name_bn": d.name_bn,
-            }
-            for d in divisions
-        ],
-        message=f"{len(divisions)}টি বিভাগের তথ্য পাওয়া গেছে।",
-    )
+    repo = AuthRepository(db)
+    divisions = await repo.get_divisions()
+    return [_format_geo(d) for d in divisions]
 
 
 @router.get("/districts", summary="List districts (optionally filtered by division)")
@@ -55,27 +56,9 @@ async def list_districts(
     db: AsyncSession = Depends(get_db),
 ):
     """Returns districts, optionally filtered by division ID."""
-    query = select(District).where(District.is_active == True)
-    if division_id:
-        query = query.where(District.division_id == division_id)
-    query = query.order_by(District.name_bn)
-
-    result = await db.execute(query)
-    districts = result.scalars().all()
-
-    return success_response(
-        data=[
-            {
-                "id": str(d.id),
-                "division_id": str(d.division_id),
-                "bbs_code": d.bbs_code,
-                "name_en": d.name_en,
-                "name_bn": d.name_bn,
-            }
-            for d in districts
-        ],
-        message=f"{len(districts)}টি জেলার তথ্য পাওয়া গেছে।",
-    )
+    repo = AuthRepository(db)
+    districts = await repo.get_districts(division_id=division_id)
+    return [_format_geo(d, ["division_id"]) for d in districts]
 
 
 @router.get("/upazilas", summary="List upazilas (optionally filtered by district)")
@@ -84,27 +67,9 @@ async def list_upazilas(
     db: AsyncSession = Depends(get_db),
 ):
     """Returns upazilas, optionally filtered by district ID."""
-    query = select(Upazila).where(Upazila.is_active == True)
-    if district_id:
-        query = query.where(Upazila.district_id == district_id)
-    query = query.order_by(Upazila.name_bn)
-
-    result = await db.execute(query)
-    upazilas = result.scalars().all()
-
-    return success_response(
-        data=[
-            {
-                "id": str(u.id),
-                "district_id": str(u.district_id),
-                "bbs_code": u.bbs_code,
-                "name_en": u.name_en,
-                "name_bn": u.name_bn,
-            }
-            for u in upazilas
-        ],
-        message=f"{len(upazilas)}টি উপজেলার তথ্য পাওয়া গেছে।",
-    )
+    repo = AuthRepository(db)
+    upazilas = await repo.get_upazilas(district_id=district_id)
+    return [_format_geo(u, ["district_id"]) for u in upazilas]
 
 
 @router.get("/unions", summary="List unions (optionally filtered by upazila)")
@@ -113,24 +78,6 @@ async def list_unions(
     db: AsyncSession = Depends(get_db),
 ):
     """Returns unions, optionally filtered by upazila ID."""
-    query = select(Union).where(Union.is_active == True)
-    if upazila_id:
-        query = query.where(Union.upazila_id == upazila_id)
-    query = query.order_by(Union.name_bn)
-
-    result = await db.execute(query)
-    unions = result.scalars().all()
-
-    return success_response(
-        data=[
-            {
-                "id": str(u.id),
-                "upazila_id": str(u.upazila_id),
-                "bbs_code": u.bbs_code,
-                "name_en": u.name_en,
-                "name_bn": u.name_bn,
-            }
-            for u in unions
-        ],
-        message=f"{len(unions)}টি ইউনিয়নের তথ্য পাওয়া গেছে।",
-    )
+    repo = AuthRepository(db)
+    unions = await repo.get_unions(upazila_id=upazila_id)
+    return [_format_geo(u, ["upazila_id"]) for u in unions]

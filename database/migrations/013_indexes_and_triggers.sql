@@ -66,6 +66,33 @@ CREATE TRIGGER trigger_market_daily_prices_updated_at BEFORE UPDATE ON market.da
 CREATE TRIGGER trigger_market_group_selling_offers_updated_at BEFORE UPDATE ON market.group_selling_offers FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER trigger_market_offer_participants_updated_at BEFORE UPDATE ON market.offer_participants FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 
+-- ============================================================================
+-- 1.1 CASE NUMBER SEQUENCE AND TRIGGER FOR case_mgmt.diagnosis_cases
+-- ============================================================================
+
+CREATE SEQUENCE IF NOT EXISTS case_mgmt.case_number_seq START WITH 1 INCREMENT BY 1;
+
+CREATE OR REPLACE FUNCTION case_mgmt.generate_case_number()
+RETURNS TRIGGER AS $$
+DECLARE
+    current_yr TEXT;
+    seq_val BIGINT;
+BEGIN
+    IF NEW.case_number IS NULL OR NEW.case_number = '' THEN
+        current_yr := TO_CHAR(CURRENT_TIMESTAMP, 'YYYY');
+        seq_val := NEXTVAL('case_mgmt.case_number_seq');
+        NEW.case_number := 'KB-' || current_yr || '-' || LPAD(seq_val::TEXT, 6, '0');
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trigger_case_mgmt_diagnosis_cases_case_number ON case_mgmt.diagnosis_cases;
+CREATE TRIGGER trigger_case_mgmt_diagnosis_cases_case_number
+    BEFORE INSERT ON case_mgmt.diagnosis_cases
+    FOR EACH ROW
+    EXECUTE FUNCTION case_mgmt.generate_case_number();
+
 
 -- ============================================================================
 -- 2. FOREIGN KEY B-TREE INDEXES

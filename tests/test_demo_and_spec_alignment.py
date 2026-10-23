@@ -20,6 +20,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.core.config import get_settings
 from app.core.security import hash_password, normalize_bd_phone
+from app.db.session import get_db
 from app.main import app
 from app.models.auth import Role, User
 from app.schemas.auth import (
@@ -38,6 +39,12 @@ settings = get_settings()
 def clean_inbox_and_state():
     sms_inbox._store.clear()
     ip_rate_limiter._store.clear()
+    mock_db = AsyncMock()
+    async def override():
+        yield mock_db
+    app.dependency_overrides[get_db] = override
+    yield
+    app.dependency_overrides.pop(get_db, None)
 
 
 @pytest_asyncio.fixture

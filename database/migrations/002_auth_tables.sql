@@ -28,6 +28,13 @@ CREATE TABLE IF NOT EXISTS auth.users (
     union_id UUID,
     preferred_language VARCHAR(10) DEFAULT 'bn' NOT NULL,
     avatar_url TEXT,
+    status VARCHAR(30) DEFAULT 'active' NOT NULL CHECK (status IN ('active', 'inactive', 'pending_approval', 'suspended', 'deleted', 'rejected')),
+    email VARCHAR(255) UNIQUE,
+    phone_verified BOOLEAN DEFAULT FALSE NOT NULL,
+    email_verified BOOLEAN DEFAULT FALSE NOT NULL,
+    last_login_at TIMESTAMPTZ,
+    village VARCHAR(200),
+    preferred_communication VARCHAR(20) DEFAULT 'sms' NOT NULL,
     is_active BOOLEAN DEFAULT TRUE NOT NULL,
     is_deleted BOOLEAN DEFAULT FALSE NOT NULL,
     deleted_at TIMESTAMPTZ,
@@ -63,8 +70,12 @@ CREATE TABLE IF NOT EXISTS auth.user_consents (
 CREATE TABLE IF NOT EXISTS auth.otp_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     phone_number VARCHAR(20) NOT NULL,
-    otp_code VARCHAR(10) NOT NULL,
+    otp_code VARCHAR(10),
+    otp_hash VARCHAR(128),
+    purpose VARCHAR(50) DEFAULT 'registration' NOT NULL,
     is_verified BOOLEAN DEFAULT FALSE NOT NULL,
+    is_used BOOLEAN DEFAULT FALSE NOT NULL,
+    verify_attempts INT DEFAULT 0 NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL
 );

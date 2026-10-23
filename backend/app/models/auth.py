@@ -15,11 +15,11 @@ Every User has exactly one Role (farmer, agent, expert, admin, tech_admin).
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -76,6 +76,14 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    # Extended profile and verification fields
+    email: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True)
+    phone_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    village: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    preferred_communication: Mapped[str] = mapped_column(String(20), default="sms", nullable=False)
 
     # Relationships
     role: Mapped["Role"] = relationship("Role", back_populates="users")
@@ -154,7 +162,7 @@ class OtpLog(Base, UUIDPrimaryKeyMixin):
     is_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     verify_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=func.now(), nullable=False)
 
 
 class RefreshToken(Base, UUIDPrimaryKeyMixin):
@@ -172,7 +180,7 @@ class RefreshToken(Base, UUIDPrimaryKeyMixin):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     is_revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=func.now(), nullable=False)
 
     user: Mapped["User"] = relationship("User", back_populates="refresh_tokens")
 
@@ -191,7 +199,7 @@ class LoginAttempt(Base, UUIDPrimaryKeyMixin):
     ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
     user_agent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=func.now(), nullable=False)
 
     user: Mapped["User"] = relationship("User", back_populates="login_attempts")
 
@@ -211,7 +219,7 @@ class AdminAction(Base, UUIDPrimaryKeyMixin):
     action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     target_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     target_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    details: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    details: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
     ip_address: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=func.now(), nullable=False)
 

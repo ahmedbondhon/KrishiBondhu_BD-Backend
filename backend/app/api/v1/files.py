@@ -142,6 +142,15 @@ async def confirm_upload(
             details=[{"field": "storage_path", "message_bn": "এই ফাইলটি ইতিমধ্যে নিবন্ধিত আছে।"}],
         )
 
+    # Verify file actually exists in storage before saving to DB
+    if not storage_service.check_file_exists(payload.storage_path):
+        return error_response(
+            message="Uploaded file not found in storage",
+            error_code="FILE_NOT_FOUND_IN_STORAGE",
+            status_code=400,
+            details=[{"field": "storage_path", "message_bn": "ক্লাউড স্টোরেজে ফাইলটি পাওয়া যায়নি। অনুগ্রহ করে প্রথমে ফাইল আপলোড করুন।"}],
+        )
+
     system_file = SystemFile(
         uploaded_by=current_user.id,
         original_name=payload.original_name,

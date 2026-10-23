@@ -29,20 +29,18 @@ async def demo_ui():
     return FileResponse(demo_file)
 
 
-if settings.sms_mode == "simulator":
+@demo_router.get("/demo/sms-inbox", include_in_schema=False)
+async def get_sms_inbox(phone: Annotated[str, Query(...)]):
+    try:
+        normalized_phone = normalize_bd_phone(phone)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    @demo_router.get("/demo/sms-inbox", include_in_schema=False)
-    async def get_sms_inbox(phone: Annotated[str, Query(...)]):
-        try:
-            normalized_phone = normalize_bd_phone(phone)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        messages = sms_inbox.get_and_delete(normalized_phone)
-        return {
-            "phone": normalized_phone,
-            "count": len(messages),
-            "messages": messages,
-            "latest_message": messages[-1]["message"] if messages else None,
-            "latest_otp": messages[-1].get("otp_code") if messages else None,
-        }
+    messages = sms_inbox.get_and_delete(normalized_phone)
+    return {
+        "phone": phone,
+        "count": len(messages),
+        "messages": messages,
+        "latest_message": messages[-1]["message"] if messages else None,
+        "latest_otp": messages[-1].get("otp_code") if messages else None,
+    }

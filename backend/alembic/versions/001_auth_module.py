@@ -35,7 +35,7 @@ def upgrade() -> None:
             ) THEN
                 ALTER TABLE auth.users
                 ADD COLUMN status VARCHAR(30) DEFAULT 'active' NOT NULL
-                CHECK (status IN ('active','inactive','pending_approval','suspended','deleted'));
+                CHECK (status IN ('active','inactive','pending_approval','suspended','deleted','rejected'));
             END IF;
 
             -- email column

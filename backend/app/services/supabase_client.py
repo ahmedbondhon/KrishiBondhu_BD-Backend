@@ -19,7 +19,8 @@ class SupabaseClient:
 
     def __init__(self):
         settings = get_settings()
-        self.base_url = f"{settings.supabase_url.rstrip('/')}/rest/v1"
+        sb_url = settings.supabase_url.rstrip('/') if settings.supabase_url else "http://localhost:8000"
+        self.base_url = f"{sb_url}/rest/v1"
         self.headers = {
             "apikey": settings.supabase_service_role_key,
             "Authorization": f"Bearer {settings.supabase_service_role_key}",
@@ -31,7 +32,14 @@ class SupabaseClient:
         """Centralized HTTP request handler to eliminate try/except boilerplate."""
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.request(method, f"{self.base_url}/{endpoint}", headers=self.headers, **kwargs)
+                m = method.lower()
+                url = f"{self.base_url}/{endpoint}"
+                headers = kwargs.pop("headers", self.headers)
+                if hasattr(client, m):
+                    fn = getattr(client, m)
+                    resp = await fn(url, headers=headers, **kwargs)
+                else:
+                    resp = await client.request(method, url, headers=headers, **kwargs)
                 if resp.status_code in (200, 201):
                     return resp.json()
                 if resp.status_code == 204:

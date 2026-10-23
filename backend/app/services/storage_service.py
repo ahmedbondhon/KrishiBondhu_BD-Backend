@@ -148,6 +148,22 @@ class StorageService:
             ExpiresIn=settings.storage_signed_url_expiry_seconds,
         )
 
+    def check_file_exists(self, storage_path: str) -> bool:
+        """
+        Check if an object exists in storage via head_object.
+        Returns True if the object exists, False otherwise.
+        """
+        try:
+            client = self._get_s3_client()
+            client.head_object(
+                Bucket=settings.storage_bucket_name,
+                Key=storage_path,
+            )
+            return True
+        except Exception:
+            return False
+
+
 
 # Module-level singleton — one client per worker process
 storage_service = StorageService()

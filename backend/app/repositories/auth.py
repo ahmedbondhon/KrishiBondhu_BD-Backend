@@ -4,11 +4,13 @@
 # ============================================================================
 
 import hashlib
+import inspect
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auth import (
@@ -33,8 +35,8 @@ class AuthRepository:
 
     async def _add_and_flush(self, obj) -> None:
         """Add an entity to the session and flush, safely awaiting if mocked as coroutine."""
-        res = self.db.add(obj)
-        if hasattr(res, "__await__"):
+        res: Any = self.db.add(obj)
+        if inspect.isawaitable(res):
             await res
         await self.db.flush()
 
@@ -43,8 +45,8 @@ class AuthRepository:
         if result is None:
             return None
         if hasattr(result, "scalar_one_or_none"):
-            val = result.scalar_one_or_none()
-            if hasattr(val, "__await__"):
+            val: Any = result.scalar_one_or_none()
+            if inspect.isawaitable(val):
                 val = await val
             return val if isinstance(val, entity_cls) else None
         return None
@@ -54,8 +56,8 @@ class AuthRepository:
         if result is None:
             return default
         if hasattr(result, "scalar"):
-            val = result.scalar()
-            if hasattr(val, "__await__"):
+            val: Any = result.scalar()
+            if inspect.isawaitable(val):
                 val = await val
             return val if isinstance(val, (int, float, bool, str)) else default
         return default
@@ -73,18 +75,18 @@ class AuthRepository:
     # Users — Queries & Mutations
     # ------------------------------------------------------------------
     async def get_user_by_id(self, user_id: uuid.UUID) -> Optional[User]:
-        stmt = select(User).where(User.id == user_id, User.is_deleted == False)
+        stmt = select(User).options(selectinload(User.role)).where(User.id == user_id, User.is_deleted == False)
         result = await self.db.execute(stmt)
         return await self._extract_entity(result, User)
 
     async def get_user_by_phone(self, phone_number: str) -> Optional[User]:
         phone_number = normalize_bd_phone(phone_number)
-        stmt = select(User).where(User.phone_number == phone_number, User.is_deleted == False)
+        stmt = select(User).options(selectinload(User.role)).where(User.phone_number == phone_number, User.is_deleted == False)
         result = await self.db.execute(stmt)
         return await self._extract_entity(result, User)
 
     async def get_user_by_email(self, email: str) -> Optional[User]:
-        stmt = select(User).where(User.email == email, User.is_deleted == False)
+        stmt = select(User).options(selectinload(User.role)).where(User.email == email, User.is_deleted == False)
         result = await self.db.execute(stmt)
         return await self._extract_entity(result, User)
 

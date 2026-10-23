@@ -50,13 +50,21 @@ def _build_engine():
             ssl_ctx.verify_mode = ssl.CERT_NONE
         connect_args["ssl"] = ssl_ctx
 
+    extra_engine_args = {}
+    import sys
+    if "pytest" in sys.modules or settings.environment.lower() == "test":
+        from sqlalchemy.pool import NullPool
+        extra_engine_args["poolclass"] = NullPool
+    else:
+        extra_engine_args["pool_size"] = 10
+        extra_engine_args["max_overflow"] = 20
+
     return create_async_engine(
         clean_url,
         echo=settings.debug,
         pool_pre_ping=True,
-        pool_size=10,
-        max_overflow=20,
         connect_args=connect_args,
+        **extra_engine_args,
     )
 
 
@@ -73,9 +81,20 @@ async_session_factory = async_sessionmaker(
 )
 
 
-async def get_db():
-    """Dependency helper yielding scoped async session."""
-    from app.core.dependencies import get_db as _core_get_db
-    async for s in _core_get_db():
-        yield s
+async def get_db() -> AsyncSession:  # type: ignore[return]
+    """
+    Provide a scoped database session for a single request.
+    Commits on success and rolls back on exception.
+    """
+    async with async_session_factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+__all__ = ["engine", "async_session_factory", "get_db"]
+
 

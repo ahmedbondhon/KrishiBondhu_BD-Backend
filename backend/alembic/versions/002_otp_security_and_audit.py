@@ -55,6 +55,14 @@ def upgrade() -> None:
             ) THEN
                 ALTER TABLE auth.otp_logs ADD COLUMN is_used BOOLEAN DEFAULT FALSE NOT NULL;
             END IF;
+
+            -- Add purpose column for OTP purpose tracking
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'auth' AND table_name = 'otp_logs' AND column_name = 'purpose'
+            ) THEN
+                ALTER TABLE auth.otp_logs ADD COLUMN purpose VARCHAR(50) DEFAULT 'registration' NOT NULL;
+            END IF;
         END $$;
     """)
 

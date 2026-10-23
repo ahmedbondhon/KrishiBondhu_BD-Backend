@@ -24,7 +24,7 @@ from typing import List, Optional, Tuple
 
 import httpx
 from fastapi import HTTPException, status
-from sqlalchemy import select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -60,15 +60,28 @@ def _confidence_label(score: float) -> str:
     return "low"
 
 
-def _generate_case_number() -> str:
+async def _generate_case_number(db: AsyncSession) -> str:
     """
-    Generate a unique case number.
-    In production, this is handled by a DB trigger (013_indexes_and_triggers.sql).
-    This fallback uses the year and a unique UUID segment to prevent collision.
+    Generate a sequential, human-readable case number (e.g., KB-2026-000124).
+    Uses the PostgreSQL sequence case_mgmt.case_number_seq, falling back to
+    table count or random hex if running without sequences.
     """
     year = datetime.now(timezone.utc).year
-    suffix = uuid.uuid4().hex[:6].upper()
-    return f"KB-{year}-{suffix}"
+    try:
+        res = await db.execute(text("SELECT nextval('case_mgmt.case_number_seq')"))
+        seq = res.scalar()
+        if seq:
+            return f"KB-{year}-{seq:06d}"
+    except Exception:
+        pass
+
+    try:
+        res = await db.execute(select(func.count(DiagnosisCase.id)))
+        count = (res.scalar() or 0) + 1
+        return f"KB-{year}-{count:06d}"
+    except Exception:
+        suffix = uuid.uuid4().hex[:6].upper()
+        return f"KB-{year}-{suffix}"
 
 
 class DiagnosisService:
@@ -80,8 +93,9 @@ class DiagnosisService:
         self, db: AsyncSession, farmer_id: uuid.UUID, payload: CreateDiagnosisCaseRequest
     ) -> DiagnosisCase:
         """Create a new draft diagnosis case."""
+        case_num = await _generate_case_number(db)
         case = DiagnosisCase(
-            case_number=_generate_case_number(),
+            case_number=case_num,
             farmer_id=farmer_id,
             crop_id=payload.crop_id,
             growth_stage_id=payload.growth_stage_id,

@@ -16,12 +16,15 @@ client = TestClient(app)
 
 
 # Mock DB to skip real database connection
-async def override_get_db():
+@pytest.fixture(autouse=True)
+def setup_db_override():
     mock_db = AsyncMock()
-    yield mock_db
+    async def override():
+        yield mock_db
+    app.dependency_overrides[get_db] = override
+    yield
+    app.dependency_overrides.pop(get_db, None)
 
-
-app.dependency_overrides[get_db] = override_get_db
 
 # Shared test data
 VALID_PHONE = "01712345678"
@@ -288,7 +291,7 @@ class TestPasswordHashing:
         plain = "123456"
         hashed = hash_password(plain)
         assert hashed != plain
-        assert hashed.startswith("$2b$")   # bcrypt prefix
+        assert hashed.startswith(("$2b$", "$argon2id$"))
 
     def test_verify_correct_password(self):
         """Correct password verifies against its hash."""

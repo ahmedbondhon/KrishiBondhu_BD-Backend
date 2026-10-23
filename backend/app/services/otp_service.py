@@ -126,8 +126,8 @@ class OtpService:
         asyncio.create_task(supabase_client.record_otp(phone, otp_hash, expires_at))
 
         res = {
-            "message": f"OTP sent to {phone} successfully.",
-            "phone_number": phone,
+            "message": f"OTP sent to {phone_number} successfully.",
+            "phone_number": phone_number,
             "purpose": purpose,
             "expires_in_seconds": settings.otp_expire_minutes * 60,
             "resend_after": 60,
@@ -139,8 +139,7 @@ class OtpService:
     def _dispatch_sms(self, phone: str, otp_code: str, purpose: str) -> None:
         msg = f"[কৃষিবন্ধু] আপনার ওটিপি কোড হলো: {otp_code}। মেয়াদ {settings.otp_expire_minutes} মিনিট।"
         # Always log OTP in console for easy development/testing without any external demo endpoints
-        logger.info(f"\n======================================================\n[KRISHIBONDHU OTP] Phone: {phone} | Purpose: {purpose}\n==> YOUR OTP CODE IS: {otp_code}\n======================================================\n")
-        if settings.sms_mode == "simulator":
+        if settings.sms_mode == "simulator" or settings.environment.lower() != "production":
             sms_inbox.put(phone, msg, otp_code=otp_code)
 
     async def verify_otp(self, phone_number: str, otp_code: str, purpose: str = "registration") -> dict:

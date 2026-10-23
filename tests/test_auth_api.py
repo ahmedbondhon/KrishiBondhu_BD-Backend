@@ -15,12 +15,15 @@ client = TestClient(app)
 
 
 # Mock DB Dependency to isolate API tests from database server
-async def override_get_db():
+@pytest.fixture(autouse=True)
+def setup_db_override():
     mock_db = AsyncMock()
-    yield mock_db
+    async def override():
+        yield mock_db
+    app.dependency_overrides[get_db] = override
+    yield
+    app.dependency_overrides.pop(get_db, None)
 
-
-app.dependency_overrides[get_db] = override_get_db
 
 
 class TestAuthApiEndpoints:

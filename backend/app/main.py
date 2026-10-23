@@ -50,6 +50,11 @@ async def lifespan(app: FastAPI):
     On shutdown:
       - Disposes the database connection pool.
     """
+    app_env = getattr(settings, "app_env", getattr(settings, "environment", "development"))
+    otp_demo = getattr(settings, "otp_demo_mode", False)
+    if (app_env == "production" or settings.environment.lower() == "production") and otp_demo:
+        raise RuntimeError("OTP_DEMO_MODE cannot be enabled in production environments for security reasons.")
+
     logger.info(f"🌾 KrishiBondhu API starting up [{settings.environment}]")
     logger.info(f"📡 Database: {settings.database_url.split('@')[-1]}")
     logger.info(f"🤖 AI Confidence Threshold: {settings.ai_confidence_threshold}")
@@ -244,6 +249,13 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 # ── Routers ───────────────────────────────────────────────
 app.include_router(api_v1_router)
+
+if settings.debug or settings.environment.lower() != "production":
+    try:
+        from app.api.demo import demo_router
+        app.include_router(demo_router)
+    except Exception as e:
+        logger.warning(f"Could not load demo_router: {e}")
 
 
 # ── Health Check ──────────────────────────────────────────

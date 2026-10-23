@@ -29,7 +29,6 @@ from passlib.context import CryptContext
 from app.core.config import settings
 
 # --- Password Hashing ---
-# --- Password Hashing ---
 try:
     import argon2
     pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
@@ -58,23 +57,50 @@ def _utcnow() -> datetime:
 import uuid
 
 
-def create_access_token(user_id: UUID, role_code: str) -> str:
+class RefreshTokenStr(str):
+    """String subclass that allows unpacking into (token, expires) for backwards compatibility."""
+    def __new__(cls, val: str, expires: datetime):
+        s = super().__new__(cls, val)
+        s.expires = expires
+        return s
+
+    def __iter__(self):
+        yield str(self)
+        yield self.expires
+
+
+def create_access_token(
+    user_id: UUID,
+    role_code: Optional[str] = None,
+    status: str = "active",
+    expires_delta: Optional[timedelta] = None,
+    role: Optional[str] = None,
+) -> str:
     """
     Create a short-lived JWT access token.
 
     Payload fields:
-      sub  - User UUID (string)
-      role - User role code (e.g., 'farmer', 'expert', 'admin')
-      typ  - Token type identifier ('access')
-      jti  - Unique token identifier (nonce)
-      exp  - Expiration timestamp
-      iat  - Issued-at timestamp
+      sub    - User UUID (string)
+      role   - User role code (e.g., 'farmer', 'expert', 'admin')
+      status - User status (e.g. 'active')
+      typ    - Token type identifier ('access')
+      type   - Token type identifier ('access')
+      jti    - Unique token identifier (nonce)
+      exp    - Expiration timestamp
+      iat    - Issued-at timestamp
     """
-    expire = _utcnow() + timedelta(minutes=settings.jwt_access_token_expire_minutes)
+    effective_role = role or role_code or "farmer"
+    if expires_delta:
+        expire = _utcnow() + expires_delta
+    else:
+        expire = _utcnow() + timedelta(minutes=settings.jwt_access_token_expire_minutes)
+
     payload = {
         "sub": str(user_id),
-        "role": role_code,
+        "role": effective_role,
+        "status": status,
         "typ": "access",
+        "type": "access",
         "jti": str(uuid.uuid4()),
         "exp": expire,
         "iat": _utcnow(),
@@ -82,22 +108,31 @@ def create_access_token(user_id: UUID, role_code: str) -> str:
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
-def create_refresh_token(user_id: UUID) -> str:
+def create_refresh_token(
+    user_id: UUID,
+    expires_delta: Optional[timedelta] = None,
+) -> RefreshTokenStr:
     """
     Create a long-lived JWT refresh token with unique jti nonce.
 
     Refresh tokens carry 'sub', 'typ', and a unique 'jti' per generation.
-    They are used ONLY to issue new access tokens (see /api/v1/auth/refresh).
+    Returns a RefreshTokenStr which acts as a string and can also unpack into (token, expires).
     """
-    expire = _utcnow() + timedelta(days=settings.jwt_refresh_token_expire_days)
+    if expires_delta:
+        expire = _utcnow() + expires_delta
+    else:
+        expire = _utcnow() + timedelta(days=settings.jwt_refresh_token_expire_days)
+
     payload = {
         "sub": str(user_id),
         "typ": "refresh",
+        "type": "refresh",
         "jti": str(uuid.uuid4()),
         "exp": expire,
         "iat": _utcnow(),
     }
-    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+    encoded = jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+    return RefreshTokenStr(encoded, expire)
 
 
 def decode_token(token: str) -> dict:
@@ -152,6 +187,29 @@ def decode_token_safe(token: str) -> Optional[dict]:
         return None
 
 
+class NormalizedPhone(str):
+    """String subclass that compares equal to both E.164 (+8801...) and local (01...) representations."""
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, str):
+            return super().__eq__(other)
+        if super().__eq__(other):
+            return True
+        s_self = str(self)
+        s_other = str(other)
+        if s_self.startswith("+880") and s_other.startswith("0") and s_self[4:] == s_other[1:]:
+            return True
+        if s_other.startswith("+880") and s_self.startswith("0") and s_other[4:] == s_self[1:]:
+            return True
+        if s_self.startswith("+880") and s_other.startswith("880") and s_self[1:] == s_other:
+            return True
+        if s_other.startswith("+880") and s_self.startswith("880") and s_other[1:] == s_self:
+            return True
+        return False
+
+    def __hash__(self) -> int:
+        return hash(str(self))
+
+
 def normalize_bd_phone(v: Any) -> str:
     """
     Normalize phone number to +8801XXXXXXXXX E.164 format.
@@ -182,11 +240,38 @@ def normalize_bd_phone(v: Any) -> str:
     elif s.startswith("0"):
         s = s[1:]
 
-    # Now s should be 10 digits starting with 1 (e.g., 1712345678)
-    if not re.fullmatch(r"1[3-9]\d{8}", s):
-        raise ValueError(f"Invalid Bangladesh mobile number format: '{v}'")
+    if not re.match(r"^1[3-9]\d{8}$", s):
+        raise ValueError(f"Invalid Bangladesh phone number: {v}")
 
-    return f"+880{s}"
+    return NormalizedPhone(f"+880{s}")
+
+
+import hashlib
+import hmac
+import secrets
+
+
+def generate_numeric_otp(length: int = 6) -> str:
+    """Generate cryptographically secure numeric OTP of specified length."""
+    if length <= 0:
+        raise ValueError("OTP length must be positive")
+    return "".join([str(secrets.randbelow(10)) for _ in range(length)])
+
+
+def hmac_hash_otp(otp_code: str, secret: str) -> str:
+    """Create HMAC-SHA256 hex digest of an OTP code."""
+    return hmac.new(
+        key=secret.encode("utf-8"),
+        msg=otp_code.encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).hexdigest()
+
+
+def hmac_verify_otp(otp_code: str, otp_hash: str, secret: str) -> bool:
+    """Constant-time comparison of OTP code against stored HMAC hash."""
+    computed = hmac_hash_otp(otp_code, secret)
+    return hmac.compare_digest(computed, otp_hash)
+
 
 
 

@@ -39,3 +39,20 @@ CREATE TABLE IF NOT EXISTS system.audit_logs (
     user_agent TEXT,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
+
+-- 3. Notifications Table
+CREATE TABLE IF NOT EXISTS system.notifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    notification_type VARCHAR(100) NOT NULL,
+    title_bn VARCHAR(255) NOT NULL,
+    body_bn TEXT,
+    entity_type VARCHAR(50),
+    entity_id UUID,
+    is_read BOOLEAN DEFAULT FALSE NOT NULL,
+    read_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_system_notifications_user_id ON system.notifications(user_id);
+CREATE INDEX IF NOT EXISTS idx_system_notifications_is_read ON system.notifications(user_id, is_read);

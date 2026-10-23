@@ -128,9 +128,23 @@ class AuthService:
         # 5. Record Consents & Sync to Supabase
         loc_granted = bool(payload.location_permission_granted)
         for code, granted in [("terms_of_service", True), ("privacy_policy", True), ("location_data", loc_granted)]:
-            await self.repo.record_user_consent(user.id, code, granted, ip_address, user_agent)
+            await self.repo.record_user_consent(
+                user_id=user.id,
+                consent_type_code=code,
+                is_granted=granted,
+                ip_address=ip_address,
+                user_agent=user_agent,
+            )
 
-        await self._sync_user_to_supabase(user, role_code, status, is_active, loc_granted, ip_address, user_agent)
+        await self._sync_user_to_supabase(
+            user=user,
+            role_code=role_code,
+            status=status,
+            is_active=is_active,
+            location_permission_granted=loc_granted,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
         return user
 
     async def _resolve_geo_ids(
@@ -200,7 +214,14 @@ class AuthService:
         if reason is not None:
             details["reason"] = reason
 
-        await self.repo.record_admin_action(admin_user.id, action, user_id, "user", details, ip)
+        await self.repo.record_admin_action(
+            actor_id=admin_user.id,
+            action=action,
+            target_id=user_id,
+            target_type="user",
+            details=details,
+            ip_address=ip,
+        )
         await supabase_client.update_user_status(str(user_id), new_status)
         return updated or user
 
@@ -314,8 +335,8 @@ class AuthService:
             or (not sb_user and user and user.effective_status == "active")
         )
         if is_active:
-            return await self.otp_service.send_otp(phone_number=phone, purpose="login")
-        return self._generic_otp_response(phone, "login")
+            return await self.otp_service.send_otp(phone_number=phone_number, purpose="login")
+        return self._generic_otp_response(phone_number, "login")
 
     async def verify_otp_login(
         self, phone_number: str, otp_code: str, remember_me: bool = False, ip_address: str | None = None, user_agent: str | None = None
@@ -337,8 +358,8 @@ class AuthService:
     async def forgot_password_request(self, phone_number: str) -> dict:
         phone = normalize_bd_phone(phone_number)
         if await supabase_client.get_user_by_phone(phone) or await self.repo.get_user_by_phone(phone):
-            return await self.otp_service.send_otp(phone_number=phone, purpose="reset_password")
-        return self._generic_otp_response(phone, "reset_password")
+            return await self.otp_service.send_otp(phone_number=phone_number, purpose="reset_password")
+        return self._generic_otp_response(phone_number, "reset_password")
 
     async def reset_password(self, payload: ResetPasswordRequest) -> None:
         phone = normalize_bd_phone(payload.phone_number)
@@ -415,8 +436,24 @@ class AuthService:
         }
 
     async def _sync_user_to_supabase(
-        self, user: User, role_code: str, status: str, is_active: bool, loc_granted: bool, ip: str | None, ua: str | None
+        self,
+        user: User,
+        role_code: str = "farmer",
+        status: str = "active",
+        is_active: bool = True,
+        loc_granted: bool = False,
+        ip: str | None = None,
+        ua: str | None = None,
+        location_permission_granted: bool | None = None,
+        ip_address: str | None = None,
+        user_agent: str | None = None,
     ) -> None:
+        if location_permission_granted is not None:
+            loc_granted = location_permission_granted
+        if ip_address is not None:
+            ip = ip_address
+        if user_agent is not None:
+            ua = user_agent
         default_role = "11000000-0000-0000-0000-000000000002" if role_code == "expert" else "11000000-0000-0000-0000-000000000001"
         sb_payload = {
             "id": str(user.id),
@@ -445,7 +482,7 @@ class AuthService:
             await supabase_client.record_user_consent(str(user.id), code, ip, ua, is_granted=granted)
 
     def _build_token_pair(self, user_id: uuid.UUID, role: str, status: str, remember_me: bool) -> tuple[str, str, datetime]:
-        access_token = create_access_token(user_id=user_id, role=role, status=status)
+        access_token = create_access_token(user_id=user_id, role_code=role, role=role, status=status)
         days = settings.remember_me_refresh_token_expire_days if remember_me else settings.refresh_token_expire_days
         refresh_token, refresh_expires = create_refresh_token(user_id=user_id, expires_delta=timedelta(days=days))
         return access_token, refresh_token, refresh_expires
