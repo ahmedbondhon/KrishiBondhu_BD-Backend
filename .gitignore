@@ -1,7 +1,6 @@
 # Environment and secrets
 .env
 .env.*
-*.env
 !.env.example
 
 # Python
@@ -21,4 +20,3 @@ __pycache__/
 
 # macOS
 .DS_Store
-demo/

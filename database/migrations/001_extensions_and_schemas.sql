@@ -9,7 +9,6 @@
 -- Enable Required Extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
--- PostGIS (available on Neon - if this fails, comment it out)
 CREATE EXTENSION IF NOT EXISTS "postgis";
 
 -- Initialize Core MVP Schemas
@@ -26,24 +25,17 @@ CREATE SCHEMA IF NOT EXISTS case_mgmt;
 CREATE SCHEMA IF NOT EXISTS climate;
 CREATE SCHEMA IF NOT EXISTS market;
 
--- Grant Schema Usage to the current database user (Neon-compatible)
-DO $$
-DECLARE
-    current_user_name TEXT := current_user;
-BEGIN
-    EXECUTE 'GRANT USAGE ON SCHEMA auth TO ' || current_user_name;
-    EXECUTE 'GRANT USAGE ON SCHEMA geo TO ' || current_user_name;
-    EXECUTE 'GRANT USAGE ON SCHEMA catalog TO ' || current_user_name;
-    EXECUTE 'GRANT USAGE ON SCHEMA farm TO ' || current_user_name;
-    EXECUTE 'GRANT USAGE ON SCHEMA system TO ' || current_user_name;
-    EXECUTE 'GRANT USAGE ON SCHEMA ai TO ' || current_user_name;
-    EXECUTE 'GRANT USAGE ON SCHEMA advisory TO ' || current_user_name;
-    EXECUTE 'GRANT USAGE ON SCHEMA case_mgmt TO ' || current_user_name;
-    EXECUTE 'GRANT USAGE ON SCHEMA climate TO ' || current_user_name;
-    EXECUTE 'GRANT USAGE ON SCHEMA market TO ' || current_user_name;
-END $$;
+-- Grant Schema Usage (Standard permissions for Supabase / database roles)
+GRANT USAGE ON SCHEMA auth TO postgres, anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA geo TO postgres, anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA catalog TO postgres, anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA farm TO postgres, anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA system TO postgres, anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA ai TO postgres, anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA advisory TO postgres, anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA case_mgmt TO postgres, anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA climate TO postgres, anon, authenticated, service_role;
+GRANT USAGE ON SCHEMA market TO postgres, anon, authenticated, service_role;
 
--- Set default search path for the current database
-SELECT pg_catalog.set_config('search_path',
-    'public, auth, geo, catalog, farm, system, ai, advisory, case_mgmt, climate, market',
-    false);
+-- Set default search path
+ALTER DATABASE postgres SET search_path TO public, auth, geo, catalog, farm, system, ai, advisory, case_mgmt, climate, market;
