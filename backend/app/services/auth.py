@@ -193,6 +193,7 @@ class AuthService:
         self, payload: FarmerAgentRegisterRequest, ip_address: str | None = None, user_agent: str | None = None
     ) -> tuple[User, TokenResponse]:
         user = await self._register_user(payload, payload.role, "active", True, ip_address, user_agent)
+        await self.db.refresh(user, attribute_names=["role"])
         return user, await self._issue_tokens(user, remember_me=False)
 
     async def register_expert(
