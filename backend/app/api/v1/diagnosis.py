@@ -309,7 +309,6 @@ async def list_cases(
     offset: int = Query(0, ge=0, description="Pagination offset"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    **kwargs,
 ):
     """Returns the farmer's full case history, most recent first."""
     result = await db.execute(
@@ -397,7 +396,6 @@ async def get_expert_cases(
     offset: int = Query(0, ge=0, description="Pagination offset"),
     current_user: User = Depends(require_roles("expert", "admin")),
     db: AsyncSession = Depends(get_db),
-    **kwargs,
 ):
     """
     Returns cases matching status_filter ('escalated', 'expert_reviewed', or 'all'), prioritized by urgency.

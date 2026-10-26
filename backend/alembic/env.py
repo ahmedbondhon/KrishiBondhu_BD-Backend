@@ -11,7 +11,7 @@ from sqlalchemy import pool, text
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.config import get_settings
-from app.db.session import Base
+from app.db.base import Base
 
 # Import all models so Alembic can detect them
 from app.models.auth import (  # noqa: F401

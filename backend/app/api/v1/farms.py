@@ -111,7 +111,6 @@ async def list_farms(
     offset: int = Query(0, ge=0, description="Pagination offset"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
-    **kwargs,
 ):
     """Returns all non-deleted plots owned by the authenticated farmer."""
     result = await db.execute(

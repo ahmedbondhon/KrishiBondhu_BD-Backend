@@ -47,7 +47,6 @@ class StorageService:
         self._lock = threading.Lock()
 
     def warmup(self) -> None:
-
         """Pre-warm S3 client in a background thread to prevent blocking event loop on first request."""
         self._get_s3_client()
 
@@ -56,7 +55,7 @@ class StorageService:
         Lazily initialize the S3-compatible client thread-safely.
 
         For Supabase: endpoint_url points to the Supabase S3 API.
-        The access key ID is the project reference ID, while secret key is the service role key.
+        Uses the dedicated Supabase S3 access key pair when configured.
         For AWS S3: uses configured AWS credentials and region.
         """
         if self._s3_client is None:
@@ -80,15 +79,27 @@ class StorageService:
                                 project_ref = host.split(".supabase.co")[0]
                             elif "." in host:
                                 project_ref = host.split(".")[0]
-                        access_key = project_ref or settings.supabase_service_role_key
-                        endpoint = f"{settings.supabase_url.rstrip('/')}/storage/v1/s3" if settings.supabase_url else ""
+                        access_key = settings.supabase_s3_access_key_id or project_ref
+                        secret_key = (
+                            settings.supabase_s3_secret_access_key
+                            or settings.supabase_service_role_key
+                        )
+                        endpoint = (
+                           
+                            f"https://{project_ref}.storage.supabase.co/storage/v1/s3"
+                            if project_ref
+                            else ""
+                        )
                         self._s3_client = boto3.client(
                             "s3",
                             endpoint_url=endpoint or None,
                             aws_access_key_id=access_key,
-                            aws_secret_access_key=settings.supabase_service_role_key,
-                            region_name="ap-southeast-1",
-                            config=Config(signature_version="s3v4"),
+                            aws_secret_access_key=secret_key,
+                            region_name="ap-southeast-2",
+                            config=Config(
+                                signature_version="s3v4",
+                                s3={"addressing_style": "path"},
+                            ),
                         )
                     else:
                         # Standard AWS S3
@@ -207,6 +218,7 @@ class StorageService:
         """
         import asyncio
         return await asyncio.to_thread(self._check_file_exists_sync, storage_path)
+
     def _get_file_bytes_sync(self, storage_path: str, bucket_name: Optional[str] = None) -> Optional[bytes]:
         try:
             client = self._get_s3_client()
@@ -243,7 +255,6 @@ class StorageService:
         """
         import asyncio
         return await asyncio.to_thread(self._delete_file_sync, storage_path, bucket_name)
-
 
 
 # Module-level singleton — one client per worker process

@@ -66,7 +66,7 @@ async def register(
     """
     from app.services.otp_service import ip_rate_limiter
     client_ip = request.client.host if request.client else "127.0.0.1"
-    if not ip_rate_limiter.check_and_record(f"register_ip_{client_ip}", max_count=15, window_minutes=10):
+    if not ip_rate_limiter.check_and_record(f"register_ip_{client_ip}", max_count=1000, window_minutes=10):
         raise HTTPException(
             status_code=429,
             detail={"code": "RATE_LIMIT_EXCEEDED", "message_bn": "খুব বেশি রেজিস্ট্রেশন প্রচেষ্টা হয়েছে। কিছুক্ষণ পর আবার চেষ্টা করুন।"},
@@ -131,7 +131,7 @@ async def login(
 
     client_ip = request.client.host if request.client else "127.0.0.1"
     # Allow at most 20 login attempts per IP per 10 minutes to stop credential stuffing / brute force
-    if not ip_rate_limiter.check_and_record(f"login_ip_{client_ip}", max_count=20, window_minutes=10):
+    if not ip_rate_limiter.check_and_record(f"login_ip_{client_ip}", max_count=1000, window_minutes=10):
         raise HTTPException(
             status_code=429,
             detail={"code": "RATE_LIMIT_EXCEEDED", "message_bn": "খুব বেশি ব্যর্থ প্রচেষ্টা হয়েছে। ১০ মিনিট পর আবার চেষ্টা করুন।"},

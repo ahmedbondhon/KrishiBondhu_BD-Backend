@@ -114,6 +114,16 @@ class DiagnosisService:
         **kwargs,
     ) -> DiagnosisCase:
         """Create a new draft diagnosis case with cross-entity IDOR checks."""
+        # 0. Validate crop exists
+        crop_res = await db.execute(
+            select(Crop.id).where(Crop.id == payload.crop_id)
+        )
+        if crop_res.scalar_one_or_none() is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "CROP_NOT_FOUND", "message_bn": "ফসলটি পাওয়া যায়নি।"},
+            )
+            
         # 1. Validate plot_id belongs to the farmer
         if payload.plot_id:
             plot_res = await db.execute(

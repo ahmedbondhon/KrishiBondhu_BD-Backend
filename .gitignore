@@ -31,3 +31,11 @@ uploads/
 
 docs
 
+
+.env
+*.log
+__pycache__/
+venv312/
+.pytest_cache/
+*.zip
+*.patch

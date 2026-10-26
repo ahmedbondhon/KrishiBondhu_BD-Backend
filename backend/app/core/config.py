@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     privileged_password_min_len: int = 8
     # --- Object Storage ---
     storage_provider: str = "supabase"         # 'supabase' | 's3' | 'cloudinary'
+    supabase_s3_access_key_id: str = ""
+    supabase_s3_secret_access_key: str = ""
     storage_bucket_name: str = "krishibondhu-uploads"
     storage_signed_url_expiry_seconds: int = 3600
     upload_dir: str = "uploads"

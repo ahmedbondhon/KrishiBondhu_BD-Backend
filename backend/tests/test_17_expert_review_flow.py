@@ -319,3 +319,70 @@ def test_13_other_farmer_forbidden():
     r = requests.get(f"{API}/diagnosis-cases/{state['farmer_case']}", headers=other)
     print("\nOTHER FARMER:", r.status_code, r.text[:200])
     assert r.status_code == 403, r.text
+
+
+def _set_status(cid, st):
+    async def _run():
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("UPDATE case_mgmt.diagnosis_cases SET status=:s WHERE id::text=:i"), {"s": st, "i": cid})
+        finally:
+            await engine.dispose()
+    asyncio.run(_run())
+
+
+def test_14_request_review_rejected_before_analysis():
+    fh = _register_farmer()
+    r = requests.post(f"{API}/diagnosis-cases", headers=fh, json={"crop_id": CROP_ID, "farmer_notes": "test case"})
+    assert r.status_code == 201, r.text
+    cid = find_key(r.json(), "case_id")
+    r = requests.post(f"{API}/diagnosis-cases/{cid}/request-expert-review", headers=fh)
+    print("\nEARLY REQUEST:", r.status_code)
+    assert r.status_code == 400, r.text
+
+
+def test_15_farmer_requests_expert_review():
+    fh = _register_farmer()
+    r = requests.post(f"{API}/diagnosis-cases", headers=fh, json={"crop_id": CROP_ID, "farmer_notes": "test case"})
+    assert r.status_code == 201, r.text
+    cid = find_key(r.json(), "case_id")
+    _set_status(cid, "ai_analyzed")
+    r = requests.post(f"{API}/diagnosis-cases/{cid}/request-expert-review", headers=fh)
+    print("\nREQUEST REVIEW:", r.status_code, r.text[:300])
+    assert r.status_code in (200, 201), r.text
+    assert find_key(r.json(), "status") == "escalated", r.text
+    q = requests.get(f"{API}/expert/cases", headers=expert_headers())
+    assert q.status_code == 200, q.text
+    assert cid in [c["id"] for c in q.json()["data"]], "requested case not in expert queue"
+    state["req_case"] = cid
+    state["req_farmer_h"] = fh
+
+
+def _assigned_expert(cid):
+    async def _run():
+        try:
+            async with engine.connect() as conn:
+                r = await conn.execute(text("SELECT status, assigned_expert_id FROM case_mgmt.diagnosis_cases WHERE id::text=:i"), {"i": cid})
+                return r.first()
+        finally:
+            await engine.dispose()
+    return asyncio.run(_run())
+
+
+def test_15_farmer_requests_expert_review():
+    fh = _register_farmer()
+    r = requests.post(f"{API}/diagnosis-cases", headers=fh, json={"crop_id": CROP_ID, "farmer_notes": "test case"})
+    assert r.status_code == 201, r.text
+    cid = find_key(r.json(), "case_id")
+    _set_status(cid, "ai_analyzed")
+    r = requests.post(f"{API}/diagnosis-cases/{cid}/request-expert-review", headers=fh)
+    print("\nREQUEST REVIEW:", r.status_code)
+    assert r.status_code in (200, 201), r.text
+    assert find_key(r.json(), "status") == "escalated", r.text
+    row = _assigned_expert(cid)
+    print("DB ROW:", row)
+    assert row[0] == "escalated", row
+    assert row[1] is not None, "no expert assigned"
+    g = requests.get(f"{API}/diagnosis-cases/{cid}", headers=fh)
+    assert g.status_code == 200, g.text
+    assert g.json()["data"]["status"] == "escalated", g.text
