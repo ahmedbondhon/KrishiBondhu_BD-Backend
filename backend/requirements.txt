@@ -8,8 +8,8 @@ uvicorn[standard]==0.30.6
 
 # --- Database (PostgreSQL + SQLAlchemy + Alembic) ---
 sqlalchemy==2.0.35
-alembic==1.13.3
-asyncpg==0.29.0              # Async PostgreSQL driver
+alembic==1.13.3          # Async PostgreSQL driver
+asyncpg>=0.30.0
 psycopg2-binary==2.9.9       # Sync driver (for Alembic migrations)
 
 # --- Authentication & Security ---
