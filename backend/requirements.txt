@@ -3,45 +3,38 @@
 # ============================================================
 
 # --- Core Framework ---
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
 
 # --- Database (PostgreSQL + SQLAlchemy + Alembic) ---
-sqlalchemy==2.0.35
-alembic==1.13.3          # Async PostgreSQL driver
+sqlalchemy>=2.0.35
+alembic>=1.13.3
 asyncpg>=0.30.0
-psycopg2-binary==2.9.9       # Sync driver (for Alembic migrations)
+psycopg2-binary>=2.9.9
 
 # --- Authentication & Security ---
-python-jose[cryptography]==3.3.0   # JWT encoding/decoding
-passlib[argon2]==1.7.4             # Password hashing (Argon2)
-argon2-cffi>=23.1.0                # Argon2 backend implementation
+python-jose[cryptography]==3.3.0
+passlib[argon2]==1.7.4
+argon2-cffi>=23.1.0
 bcrypt==4.2.0
 
 # --- Validation & Settings ---
-pydantic>=2.12.5,<3.0.0
-pydantic-settings==2.5.2
-python-multipart==0.0.12           # For form data & file uploads
+pydantic>=2.10.0,<3.0.0
+pydantic-settings>=2.5.2
+python-multipart>=0.0.12
 
-# --- Storage (Supabase / S3 compatible) ---
-# --- AI Service & Vision ---
-google-genai>=2.33.0
+# --- AI Service, Vision & Storage ---
+google-genai>=1.0.0
 pymupdf>=1.24.0
 numpy>=1.26.0
-boto3==1.35.28                     # AWS S3 / Supabase S3-compatible API
-httpx>=0.28.1,<1.0.0                      # Async HTTP client (for internal AI service calls)
-Pillow>=10.4.0                       # Image processing (quick diagnosis & vision)
+boto3>=1.35.28
+httpx>=0.28.1,<1.0.0
+Pillow>=10.4.0
 
 # --- Utilities ---
-python-dotenv==1.0.1
-pytz==2024.2                       # Timezone (Asia/Dhaka)
-
-# --- Testing ---
-pytest==8.3.3
-pytest-asyncio==0.24.0
-anyio[trio]>=4.8.0,<5.0.0          # Required for httpx ASGITransport async tests
+python-dotenv>=1.0.1
+pytz>=2024.2
 
 # --- Rate Limiting & Validation ---
-slowapi==0.1.10
-email-validator==2.2.0
-
+slowapi>=0.1.9
+email-validator>=2.2.0
