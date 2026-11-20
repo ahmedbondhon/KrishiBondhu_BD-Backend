@@ -4,6 +4,7 @@ import React, { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import bcrypt from "bcryptjs";
+import { GEO_DIVISIONS, GEO_DISTRICTS, GEO_UPAZILAS } from "@/lib/geoDatabase";
 import { useAppStore, UserRole } from "@/store/useAppStore";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -25,8 +26,8 @@ export default function LoginPage() {
   const isBn = language === "bn";
 
   const [selectedRole, setSelectedRole] = useState<UserRole>("farmer");
-  const [phoneNumber, setPhoneNumber] = useState("01712345678");
-  const [password, setPassword] = useState("123456");
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [password, setPassword] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
@@ -34,16 +35,8 @@ export default function LoginPage() {
   const handleRoleTabChange = (r: UserRole) => {
     setSelectedRole(r);
     setErrorMsg("");
-    if (r === "farmer") {
-      setPhoneNumber("");
-      setPassword("");
-    } else if (r === "expert") {
-      setPhoneNumber("");
-      setPassword("");
-    } else {
-      setPhoneNumber("admin");
-      setPassword("admin");
-    }
+    setPhoneNumber("");
+    setPassword("");
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -51,26 +44,16 @@ export default function LoginPage() {
     setIsLoading(true);
     setErrorMsg("");
 
-    // Admin shortcut login: only username: admin, password: admin
+    // Admin login: authenticates against backend or Supabase
     if (selectedRole === "admin" || phoneNumber.trim().toLowerCase() === "admin") {
-      if (phoneNumber.trim().toLowerCase() !== "admin" || password !== "admin") {
-        setErrorMsg(
-          isBn
-            ? "ভুল ক্রেডেনশিয়াল! অ্যাডমিন লগইনের জন্য শুধুমাত্র ইউজারনেম: admin এবং পাসওয়ার্ড: admin ব্যবহার করুন।"
-            : "Invalid credentials! For admin login, use only username: admin and password: admin."
-        );
-        setIsLoading(false);
-        return;
-      }
-
       const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
       try {
         const backendResp = await fetch(`${backendUrl}/api/v1/auth/login`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            username: "admin",
-            password: "admin",
+            username: phoneNumber.trim(),
+            password: password,
           }),
         });
         if (backendResp.ok) {
@@ -79,64 +62,83 @@ export default function LoginPage() {
           if (authData.access_token && typeof window !== "undefined") {
             localStorage.setItem("kb_access_token", authData.access_token);
           }
+          const u = authData.user || {};
+          login({
+            id: u.id || "admin",
+            fullName: u.full_name || (isBn ? "সিস্টেম অ্যাডমিনিস্ট্রেটর" : "System Administrator"),
+            phoneNumber: u.phone_number || "admin",
+            role: "admin",
+            division: u.division || "ঢাকা",
+            district: u.district || "ঢাকা সদর",
+          });
+          setRole("admin");
+          router.push("/admin");
+          setIsLoading(false);
+          return;
+        } else {
+          setErrorMsg(
+            isBn
+              ? "অ্যাডমিন ইউজারনেম বা পাসওয়ার্ড সঠিক নয়।"
+              : "Invalid admin username or password."
+          );
+          setIsLoading(false);
+          return;
         }
       } catch {
-        // Fallback to local store
+        setErrorMsg(
+          isBn
+            ? "অ্যাডমিন লগইনের জন্য ব্যাকএন্ড সার্ভার চালু থাকতে হবে।"
+            : "Backend server must be running for admin login."
+        );
+        setIsLoading(false);
+        return;
       }
-
-      login({
-        id: "admin-master-001",
-        fullName: isBn ? "সিস্টেম অ্যাডমিনিস্ট্রেটর" : "System Administrator",
-        phoneNumber: "admin",
-        role: "admin",
-        division: "ঢাকা",
-        district: "ঢাকা সদর",
-      });
-      setRole("admin");
-      router.push("/admin");
-      setIsLoading(false);
-      return;
     }
 
     const cleanPhone = phoneNumber.replace(/[^0-9]/g, "");
-    const bdOperatorRegex = /^(8801[3-9]\d{8}|01[3-9]\d{8}|1[3-9]\d{8})$/;
-    if (!bdOperatorRegex.test(cleanPhone)) {
+    const coreDigits = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : cleanPhone;
+    const bdOperatorRegex = /^[3-9]\d{8}$/; // last 9 digits after 01
+
+    if (cleanPhone.length < 10 || (coreDigits.startsWith("1") && !bdOperatorRegex.test(coreDigits.slice(1)))) {
       setErrorMsg(
         isBn
-          ? "শুধুমাত্র বাংলাদেশের বৈধ অপারেটর নম্বর গ্রহণযোগ্য (013, 014, 015, 016, 017, 018, 019)।"
-          : "Only valid Bangladesh mobile operators are allowed (013, 014, 015, 016, 017, 018, 019)."
+          ? "শুধুমাত্র বাংলাদেশের বৈধ মোবাইল নম্বর দিন (যেমন: 017XXXXXXXX, 018XXXXXXXX)।"
+          : "Please enter a valid Bangladesh mobile number (e.g. 017XXXXXXXX)."
       );
       setIsLoading(false);
       return;
     }
 
-    const formattedPhone = cleanPhone.startsWith("880")
-      ? "+" + cleanPhone
-      : cleanPhone.startsWith("01")
-      ? "+88" + cleanPhone
-      : "+880" + cleanPhone;
+    const pLocal = "0" + coreDigits;
+    const pE164 = "+880" + coreDigits;
+    const p880 = "880" + coreDigits;
+    const pCore = coreDigits;
 
     try {
       // 1. First attempt login through FastAPI Backend
       const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+      let backendFailed = false;
+
       try {
         const backendResp = await fetch(`${backendUrl}/api/v1/auth/login`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            phone_number: cleanPhone,
+            phone_number: pLocal,
             password: password,
           }),
         });
+
         if (backendResp.ok) {
           const resData = await backendResp.json();
           const authData = resData.data || resData;
           if (authData?.user) {
             const u = authData.user;
+            const rawRole = typeof u.role === "object" ? u.role?.code : u.role;
             const dbRole: UserRole =
-              u.role === "admin" || u.role === "administrator"
+              rawRole === "admin" || rawRole === "administrator"
                 ? "admin"
-                : u.role === "expert"
+                : rawRole === "expert"
                 ? "expert"
                 : "farmer";
 
@@ -144,13 +146,18 @@ export default function LoginPage() {
               localStorage.setItem("kb_access_token", authData.access_token);
             }
 
+            const divName = u.division || (GEO_DIVISIONS.find((d) => d.id === u.division_id)?.nameBn) || "রাজশাহী";
+            const distName = u.district || (GEO_DISTRICTS.find((d) => d.id === u.district_id)?.nameBn) || "বগুড়া";
+            const upzName = u.upazila || (GEO_UPAZILAS.find((up) => up.id === u.upazila_id)?.nameBn) || "";
+
             login({
               id: u.id,
               fullName: u.full_name,
               phoneNumber: u.phone_number,
               role: dbRole,
-              division: u.division || "রাজশাহী",
-              district: u.district || "বগুড়া",
+              division: divName,
+              district: distName,
+              upazila: upzName,
             });
             setRole(dbRole);
             if ((dbRole as string) === "admin") router.push("/admin");
@@ -158,34 +165,60 @@ export default function LoginPage() {
             else router.push("/");
             return;
           }
+        } else if (backendResp.status === 401 || backendResp.status === 403 || backendResp.status === 400) {
+          // Backend actively rejected with invalid credentials — STRICT rejection!
+          const errData = await backendResp.json().catch(() => ({}));
+          const msg =
+            errData?.detail?.message_bn ||
+            errData?.message ||
+            (isBn
+              ? "ফোন নম্বর বা পাসওয়ার্ড ভুল হয়েছে। অনুগ্রহ করে সঠিক তথ্য দিন।"
+              : "Invalid phone number or password. Please try again.");
+          setErrorMsg(typeof msg === "string" ? msg : JSON.stringify(msg));
+          setIsLoading(false);
+          return;
+        } else {
+          backendFailed = true;
         }
       } catch {
-        // Backend not running; fallback to Supabase / local demo check
+        // Backend server offline (network error)
+        backendFailed = true;
       }
 
-      // Direct REST query to Supabase users & roles table as fallback
-      const sbUrl = "https://damfsrzakxxccalogghh.supabase.co/rest/v1";
-      const sbKey =
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRhbWZzcnpha3h4Y2NhbG9nZ2hoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MTk3OTE1MywiZXhwIjoyMTA3NTU1MTUzfQ.1t8QxaKh9GfFjdcz3vRvY-FbYK8Af9b-xDa8t8fSDi8";
+      // 2. Direct REST query to Supabase users table (only if backend is offline)
+      if (backendFailed) {
+        const sbUrl = "https://damfsrzakxxccalogghh.supabase.co/rest/v1";
+        const sbKey =
+          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRhbWZzcnpha3h4Y2NhbG9nZ2hoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MTk3OTE1MywiZXhwIjoyMTA3NTU1MTUzfQ.1t8QxaKh9GfFjdcz3vRvY-FbYK8Af9b-xDa8t8fSDi8";
 
-      const resp = await fetch(
-        `${sbUrl}/users?or=(phone_number.eq.${cleanPhone},phone_number.eq.${formattedPhone})&select=id,phone_number,password_hash,full_name,status,roles(code,name)`,
-        {
-          headers: {
-            apikey: sbKey,
-            Authorization: `Bearer ${sbKey}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
+        const queryFilter = `or=(phone_number.eq.${pLocal},phone_number.eq.${pE164},phone_number.eq.${p880},phone_number.eq.${pCore},phone_number.eq.${cleanPhone})`;
+        const resp = await fetch(
+          `${sbUrl}/users?${queryFilter}&select=id,phone_number,password_hash,full_name,status,division_id,district_id,upazila_id,roles(code,name)`,
+          {
+            headers: {
+              apikey: sbKey,
+              Authorization: `Bearer ${sbKey}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
 
-      if (resp.ok) {
-        const users = await resp.json();
-        if (users && users.length > 0) {
-          const user = users[0];
+        if (resp.ok) {
+          const users = await resp.json();
+          if (users && users.length > 0) {
+            const user = users[0];
 
-          // 1. Password Verification via bcrypt against Supabase password_hash
-          if (user.password_hash) {
+            // STRICT Password Verification against user.password_hash
+            if (!user.password_hash) {
+              setErrorMsg(
+                isBn
+                  ? "এই অ্যাকাউন্টের কোনো পাসওয়ার্ড সেট করা নেই।"
+                  : "No password set for this account."
+              );
+              setIsLoading(false);
+              return;
+            }
+
             let isPasswordMatch = false;
             try {
               isPasswordMatch = bcrypt.compareSync(password, user.password_hash);
@@ -193,67 +226,73 @@ export default function LoginPage() {
               isPasswordMatch = false;
             }
 
-            // Also check for demo pin fallback if applicable
-            if (!isPasswordMatch && password !== "123456" && password !== "Password123!") {
+            if (!isPasswordMatch) {
               setErrorMsg(
                 isBn
-                  ? "পাসওয়ার্ড / পিন ভুল হয়েছে। অনুগ্রহ করে সঠিক পাসওয়ার্ড দিন।"
-                  : "Invalid password or PIN. Please enter the correct password."
+                  ? "পাসওয়ার্ড ভুল হয়েছে। অনুগ্রহ করে সঠিক পাসওয়ার্ড দিন।"
+                  : "Invalid password. Please enter the correct password."
               );
               setIsLoading(false);
               return;
             }
-          }
 
-          const rawRole = user.roles?.code || "farmer";
-          const dbRole: UserRole =
-            rawRole === "administrator" || rawRole === "admin" || rawRole === "technical_admin"
-              ? "admin"
-              : rawRole === "expert"
-              ? "expert"
-              : "farmer";
+            if (user.status === "suspended") {
+              setErrorMsg(
+                isBn
+                  ? "আপনার অ্যাকাউন্টটি স্থগিত (Suspended) রয়েছে।"
+                  : "Your account has been suspended."
+              );
+              setIsLoading(false);
+              return;
+            }
 
-          // Strict validation: check if chosen role matches Supabase user role
-          if (dbRole !== selectedRole) {
+            const rawRole = user.roles?.code || "farmer";
+            const dbRole: UserRole =
+              rawRole === "administrator" || rawRole === "admin" || rawRole === "technical_admin"
+                ? "admin"
+                : rawRole === "expert"
+                ? "expert"
+                : "farmer";
+
+            const divName = GEO_DIVISIONS.find((d) => d.id === user.division_id)?.nameBn || "রাজশাহী";
+            const distName = GEO_DISTRICTS.find((d) => d.id === user.district_id)?.nameBn || "বগুড়া";
+            const upzName = GEO_UPAZILAS.find((up) => up.id === user.upazila_id)?.nameBn || "";
+
+            login({
+              id: user.id,
+              fullName: user.full_name || (isBn ? "কৃষক বন্ধু" : "Farmer Friend"),
+              phoneNumber: user.phone_number || pLocal,
+              role: dbRole,
+              division: divName,
+              district: distName,
+              upazila: upzName,
+            });
+            setRole(dbRole);
+
+            if ((dbRole as string) === "admin") router.push("/admin");
+            else if (dbRole === "expert") router.push("/expert");
+            else router.push("/");
+            return;
+          } else {
             setErrorMsg(
               isBn
-                ? `সুপাবেস ডাটাবেজ তথ্য অনুযায়ী '${user.full_name}' একজন '${
-                    dbRole === "farmer" ? "কৃষক" : dbRole === "expert" ? "কৃষিবিদ" : "অ্যাডমিন"
-                  }'। আপনি '${
-                    selectedRole === "farmer" ? "কৃষক" : selectedRole === "expert" ? "কৃষিবিদ" : "অ্যাডমিন"
-                  }' ট্যাবে প্রবেশ করতে পারবেন না।`
-                : `According to Supabase records, this account is a '${dbRole}'. You cannot log in via '${selectedRole}' role.`
+                ? "এই মোবাইল নম্বরটি ডাটাবেজে পাওয়া যায়নি। আপনি কি আগে নিবন্ধন (Register) করেছেন?"
+                : "Mobile number not found in database. Have you registered an account?"
             );
             setIsLoading(false);
             return;
           }
-
-          // Verified successfully with Supabase!
-          login({
-            id: user.id,
-            fullName: user.full_name,
-            phoneNumber: user.phone_number,
-            role: dbRole,
-            division: "রাজশাহী",
-            district: "বগুড়া",
-          });
-          setRole(dbRole);
-
-          if ((dbRole as string) === "admin") router.push("/admin");
-          else if (dbRole === "expert") router.push("/expert");
-          else router.push("/");
-          return;
         }
       }
-    } catch {
-      // Supabase network error
+    } catch (err) {
+      console.error("Login process error:", err);
     }
 
-    // If phone not in Supabase
+    // Default error if neither backend nor database verified the user
     setErrorMsg(
       isBn
-        ? "এই মোবাইল নম্বরটি সুপাবেস (Supabase) ডাটাবেজে পাওয়া যায়নি। অনুগ্রহ করে সঠিক নম্বর দিন।"
-        : "Mobile number not found in Supabase database."
+        ? "লগইন ব্যর্থ হয়েছে। ফোন নম্বর বা পাসওয়ার্ড সঠিক নয়।"
+        : "Login failed. Invalid phone number or password."
     );
     setIsLoading(false);
   };
@@ -435,18 +474,6 @@ export default function LoginPage() {
             </Button>
           </form>
 
-          {/* Supabase Live Credentials Helper */}
-          <div className="p-3 bg-muted/50 rounded-xl border border-border text-[11px] text-muted-foreground space-y-1">
-            <div className="font-semibold text-foreground flex items-center gap-1">
-              <Database className="h-3.5 w-3.5 text-emerald-600" />
-              <span>{isBn ? "সুপাবেস ডাটাবেজের ইউজার টেস্ট অ্যাকাউন্ট:" : "Supabase Live Accounts:"}</span>
-            </div>
-            <div>
-              {selectedRole === "farmer" && "• কৃষক: 01712345678 (মো. আব্দুর রহিম) — Role: farmer"}
-              {selectedRole === "expert" && "• কৃষিবিদ: 01712000002 — Role: expert"}
-              {selectedRole === "admin" && "• অ্যাডমিন: 01700000001 (System Administrator) — Role: administrator"}
-            </div>
-          </div>
 
           {/* Registration Option */}
           <div className="text-center pt-3 border-t text-xs text-muted-foreground">

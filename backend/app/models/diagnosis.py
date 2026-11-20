@@ -41,7 +41,7 @@ class DiagnosisCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = {"schema": "case_mgmt"}
 
     case_number: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
-    farmer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
+    farmer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="CASCADE"), nullable=False)
     plot_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("farm.plots.id", ondelete="SET NULL"))
     plot_crop_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("farm.plot_crops.id", ondelete="SET NULL"))
     crop_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("catalog.crops.id", ondelete="RESTRICT"))
@@ -58,7 +58,7 @@ class DiagnosisCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Case lifecycle
     status: Mapped[str] = mapped_column(String(50), default="submitted", nullable=False)
     urgency_level: Mapped[str] = mapped_column(String(20), default="medium", nullable=False)
-    assigned_expert_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
+    assigned_expert_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="SET NULL"))
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -101,7 +101,7 @@ class CaseStatusHistory(Base, UUIDPrimaryKeyMixin):
     case_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("case_mgmt.diagnosis_cases.id", ondelete="CASCADE"), nullable=False)
     previous_status: Mapped[Optional[str]] = mapped_column(String(50))
     new_status: Mapped[str] = mapped_column(String(50), nullable=False)
-    changed_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
+    changed_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="SET NULL"))
     notes: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -116,7 +116,7 @@ class ExpertProfile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "expert_profiles"
     __table_args__ = {"schema": "case_mgmt"}
 
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), unique=True, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="CASCADE"), unique=True, nullable=False)
     designation: Mapped[str] = mapped_column(String(150), nullable=False)
     organization: Mapped[str] = mapped_column(String(200), nullable=False)
     specialization_notes: Mapped[Optional[str]] = mapped_column(Text)
@@ -140,7 +140,7 @@ class ExpertReview(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = {"schema": "case_mgmt"}
 
     case_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("case_mgmt.diagnosis_cases.id", ondelete="CASCADE"), nullable=False)
-    expert_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="RESTRICT"), nullable=False)
+    expert_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="RESTRICT"), nullable=False)
     agreed_with_ai: Mapped[bool] = mapped_column(Boolean, nullable=False)
     verified_issue_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("catalog.issues.id", ondelete="RESTRICT"))
     diagnosis_notes_bn: Mapped[str] = mapped_column(Text, nullable=False)
@@ -162,8 +162,8 @@ class CaseAssignment(Base, UUIDPrimaryKeyMixin):
     __table_args__ = {"schema": "case_mgmt"}
 
     case_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("case_mgmt.diagnosis_cases.id", ondelete="CASCADE"), nullable=False)
-    expert_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="RESTRICT"), nullable=False)
-    assigned_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
+    expert_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="RESTRICT"), nullable=False)
+    assigned_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="SET NULL"))
     status: Mapped[str] = mapped_column(String(50), default="assigned", nullable=False)
     assigned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     responded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))

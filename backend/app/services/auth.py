@@ -33,8 +33,10 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token_safe,
+    get_bd_phone_variants,
     hash_password,
     normalize_bd_phone,
+    to_local_bd_phone,
     verify_password,
 )
 from app.models.auth import User
@@ -350,7 +352,7 @@ class AuthService:
 
     async def login(self, payload: LoginRequest, ip_address: str | None = None, user_agent: str | None = None) -> TokenResponse:
         if payload.phone_number:
-            payload.phone_number = normalize_bd_phone(payload.phone_number)
+            payload.phone_number = to_local_bd_phone(payload.phone_number)
             sb_user = await supabase_client.get_user_by_phone(payload.phone_number)
         else:
             sb_user = await supabase_client.get_user_by_email(payload.email) if payload.email else None
@@ -402,6 +404,10 @@ class AuthService:
         )
         if is_active:
             return await self.otp_service.send_otp(phone_number=phone_number, purpose="login")
+        from app.services.otp_service import phone_rate_limiter
+        max_phone_attempts = settings.otp_rate_limit_per_phone if not settings.otp_demo_mode else 10
+        if not phone_rate_limiter.check_and_record(phone, max_phone_attempts, settings.otp_rate_limit_window_minutes):
+            self.otp_service._raise_rate_limit("phone")
         return self._generic_otp_response(phone_number, "login")
 
     async def verify_otp_login(
@@ -411,11 +417,17 @@ class AuthService:
         await self.otp_service.verify_otp(phone_number=phone, otp_code=otp_code, purpose="login")
 
         if sb_user := await supabase_client.get_user_by_phone(phone):
+            # Bug 7 fix: mark phone_verified in Supabase after successful OTP login
+            if not sb_user.get("phone_verified"):
+                await supabase_client.update_phone_verified(sb_user["id"], verified=True)
             return await self._complete_supabase_login(sb_user, remember_me, ip_address, user_agent)
 
         user = await self.repo.get_user_by_phone(phone)
         if not user:
             raise UserNotFoundError("phone number")
+        # Bug 7 fix: mark phone_verified=True in local DB after successful OTP login
+        if not user.phone_verified:
+            await self.repo.update_phone_verified(user.id, verified=True)
         return await self._complete_local_login(user, remember_me, ip_address, user_agent)
 
     # ------------------------------------------------------------------
@@ -425,6 +437,10 @@ class AuthService:
         phone = normalize_bd_phone(phone_number)
         if await supabase_client.get_user_by_phone(phone) or await self.repo.get_user_by_phone(phone):
             return await self.otp_service.send_otp(phone_number=phone_number, purpose="reset_password")
+        from app.services.otp_service import phone_rate_limiter
+        max_phone_attempts = settings.otp_rate_limit_per_phone if not settings.otp_demo_mode else 10
+        if not phone_rate_limiter.check_and_record(phone, max_phone_attempts, settings.otp_rate_limit_window_minutes):
+            self.otp_service._raise_rate_limit("phone")
         return self._generic_otp_response(phone_number, "reset_password")
 
     async def reset_password(self, payload: ResetPasswordRequest) -> None:

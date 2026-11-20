@@ -49,10 +49,16 @@ def _build_engine():
             ssl_ctx.check_hostname = False
             ssl_ctx.verify_mode = ssl.CERT_NONE
         connect_args["ssl"] = ssl_ctx
+    # Supabase connection pooler (PgBouncer port 6543) requires disabling statement cache
+    # both in asyncpg and in SQLAlchemy's AsyncAdapt layer, plus empty statement names
+    connect_args["statement_cache_size"] = 0
+    connect_args["prepared_statement_cache_size"] = 0
+    connect_args["prepared_statement_name_func"] = lambda: ""
 
     extra_engine_args = {}
+    is_pgbouncer = (parsed.port == 6543) or ("pooler.supabase.com" in (parsed.hostname or "")) or ("pgbouncer=true" in db_url.lower())
     import sys
-    if "pytest" in sys.modules or settings.environment.lower() == "test":
+    if "pytest" in sys.modules or settings.environment.lower() == "test" or is_pgbouncer:
         from sqlalchemy.pool import NullPool
         extra_engine_args["poolclass"] = NullPool
     else:

@@ -1,9 +1,10 @@
 "use client";
 
-import React from "react";
+import React, { useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useAppStore } from "@/store/useAppStore";
+import { BACKEND_URL } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -37,10 +38,62 @@ export default function Navbar() {
     isAuthenticated,
     currentUser,
     openAuthModal,
+    login,
     logout,
   } = useAppStore();
 
   const isBn = language === "bn";
+
+  // Restore authenticated session from localStorage if needed
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!currentUser) {
+      const saved = localStorage.getItem("kb_user_profile");
+      if (saved) {
+        try {
+          const u = JSON.parse(saved);
+          if (u && u.id) {
+            login(u);
+          }
+        } catch {}
+      }
+    }
+  }, [currentUser, login]);
+
+  const handleLogout = async () => {
+    try {
+      const refreshToken =
+        typeof window !== "undefined"
+          ? localStorage.getItem("kb_refresh_token")
+          : null;
+      const accessToken =
+        typeof window !== "undefined"
+          ? localStorage.getItem("kb_access_token")
+          : null;
+
+      if (refreshToken || accessToken) {
+        await fetch(`${BACKEND_URL}/api/v1/auth/logout`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+          },
+          body: JSON.stringify({
+            refresh_token: refreshToken || "logout",
+          }),
+        }).catch(() => {});
+      }
+    } catch {
+      // ignore
+    } finally {
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("kb_access_token");
+        localStorage.removeItem("kb_refresh_token");
+      }
+      logout();
+      router.push("/login");
+    }
+  };
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-emerald-900/10 dark:border-emerald-500/20 bg-background/95 backdrop-blur-md">
@@ -252,10 +305,7 @@ export default function Navbar() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => {
-                  logout();
-                  router.push("/login");
-                }}
+                onClick={handleLogout}
                 className="h-8 px-2.5 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/20 border-rose-200"
               >
                 <LogOut className="h-3.5 w-3.5 mr-1" />

@@ -5,6 +5,7 @@ import { useAppStore } from "@/store/useAppStore";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { BACKEND_URL } from "@/lib/api";
 import {
   AlertTriangle,
   CheckCircle,
@@ -33,7 +34,32 @@ export default function DiagnosisResult() {
   const isPendingExpert = activeCase.status === "pending_expert";
   const isReviewed = activeCase.status === "reviewed";
 
-  const handleRequestExpert = () => {
+  const handleRequestExpert = async () => {
+    const token =
+      typeof window !== "undefined"
+        ? localStorage.getItem("kb_access_token")
+        : null;
+
+    if (token && activeCase?.id) {
+      try {
+        await fetch(
+          `${BACKEND_URL}/api/v1/diagnosis-cases/${activeCase.id}/request-expert-review`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              farmer_notes_bn: "কৃষিবিদ পর্যালোচনার জন্য জমা দেওয়া হয়েছে।",
+            }),
+          }
+        ).catch(() => {});
+      } catch {
+        // Fallback to local store
+      }
+    }
+
     updateCaseStatus(
       activeCase.id,
       "pending_expert",
@@ -41,9 +67,31 @@ export default function DiagnosisResult() {
     );
   };
 
-  const handleSimulateAudio = () => {
-    setIsPlayingAudio(true);
-    setTimeout(() => setIsPlayingAudio(false), 3000);
+  const handleSpeakAudio = () => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      return;
+    }
+    if (isPlayingAudio) {
+      window.speechSynthesis.cancel();
+      setIsPlayingAudio(false);
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    const speechText = `${activeCase.cropNameBn} ফসলের ${activeCase.diseaseNameBn} রোগ। চিকিৎসা সুপারিশ: ${activeCase.treatmentBn}। প্রতিরোধ ব্যবস্থা: ${activeCase.preventionBn}`;
+    const utterance = new SpeechSynthesisUtterance(speechText);
+    utterance.lang = isBn ? "bn-BD" : "en-US";
+    utterance.rate = 0.92;
+
+    const voices = window.speechSynthesis.getVoices();
+    const bnVoice = voices.find((v) => v.lang.startsWith("bn") || v.name.toLowerCase().includes("bangla"));
+    if (bnVoice) utterance.voice = bnVoice;
+
+    utterance.onstart = () => setIsPlayingAudio(true);
+    utterance.onend = () => setIsPlayingAudio(false);
+    utterance.onerror = () => setIsPlayingAudio(false);
+
+    window.speechSynthesis.speak(utterance);
   };
 
   const handleShare = () => {
@@ -188,7 +236,7 @@ export default function DiagnosisResult() {
             <Button
               variant="outline"
               size="sm"
-              onClick={handleSimulateAudio}
+              onClick={handleSpeakAudio}
               className="text-xs font-medium"
             >
               <Volume2

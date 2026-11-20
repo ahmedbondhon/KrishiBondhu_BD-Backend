@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.api.v1 import api_v1_router
 from app.core.config import settings
@@ -285,6 +285,11 @@ async def health_check():
 
 
 # ── Root ──────────────────────────────────────────────────
+@app.get("/docs", include_in_schema=False)
+async def docs_redirect():
+    return RedirectResponse(url="/api/v1/docs")
+
+
 @app.get("/", tags=["Root"], include_in_schema=False)
 async def root():
     return {

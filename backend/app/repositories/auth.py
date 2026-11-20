@@ -24,7 +24,7 @@ from app.models.auth import (
     UserConsent,
 )
 from app.models.geo import District, Division, Union, Upazila
-from app.core.security import normalize_bd_phone
+from app.core.security import get_bd_phone_variants, normalize_bd_phone, to_local_bd_phone
 
 
 class AuthRepository:
@@ -80,14 +80,14 @@ class AuthRepository:
         return await self._extract_entity(result, User)
 
     async def get_user_by_phone(self, phone_number: str) -> Optional[User]:
-        phone_number = normalize_bd_phone(phone_number)
-        stmt = select(User).options(selectinload(User.role)).where(User.phone_number == phone_number, User.is_deleted == False)
+        variants = get_bd_phone_variants(phone_number)
+        stmt = select(User).options(selectinload(User.role)).where(User.phone_number.in_(variants), User.is_deleted == False)
         result = await self.db.execute(stmt)
         return await self._extract_entity(result, User)
 
     async def get_user_by_phone_any_state(self, phone_number: str) -> Optional[User]:
-        phone_number = normalize_bd_phone(phone_number)
-        stmt = select(User).options(selectinload(User.role)).where(User.phone_number == phone_number)
+        variants = get_bd_phone_variants(phone_number)
+        stmt = select(User).options(selectinload(User.role)).where(User.phone_number.in_(variants))
         result = await self.db.execute(stmt)
         return await self._extract_entity(result, User)
 
@@ -97,8 +97,8 @@ class AuthRepository:
         return await self._extract_entity(result, User)
 
     async def phone_exists(self, phone_number: str) -> bool:
-        phone_number = normalize_bd_phone(phone_number)
-        stmt = select(func.count()).select_from(User).where(User.phone_number == phone_number, User.is_deleted == False)
+        variants = get_bd_phone_variants(phone_number)
+        stmt = select(func.count()).select_from(User).where(User.phone_number.in_(variants), User.is_deleted == False)
         result = await self.db.execute(stmt)
         val = await self._extract_scalar(result, 0)
         return (val or 0) > 0
@@ -125,6 +125,12 @@ class AuthRepository:
     async def update_user_language(self, user_id: uuid.UUID, language: str) -> None:
         stmt = update(User).where(User.id == user_id).values(preferred_language=language, updated_at=datetime.now(timezone.utc))
         await self.db.execute(stmt)
+
+    async def update_phone_verified(self, user_id: uuid.UUID, verified: bool = True) -> None:
+        """Mark the user's phone as verified (e.g. after successful OTP login)."""
+        stmt = update(User).where(User.id == user_id).values(phone_verified=verified, updated_at=datetime.now(timezone.utc))
+        await self.db.execute(stmt)
+
 
     # ------------------------------------------------------------------
     # Refresh Tokens
@@ -252,17 +258,16 @@ class AuthRepository:
         **kwargs,
     ) -> Optional[OtpLog]:
         """Fetch the latest active OTP that is neither expired, used, nor maxed-out."""
-        phone_number = normalize_bd_phone(phone_number)
+        variants = get_bd_phone_variants(phone_number)
         from app.core.config import get_settings
         max_attempts = get_settings().otp_max_verify_attempts
 
         stmt = (
             select(OtpLog)
             .where(
-                OtpLog.phone_number == phone_number,
+                OtpLog.phone_number.in_(variants),
                 OtpLog.purpose == purpose,
                 OtpLog.is_used == False,
-                OtpLog.verify_attempts < max_attempts,
             )
             .order_by(OtpLog.created_at.desc())
             .limit(1)
@@ -311,13 +316,13 @@ class AuthRepository:
         within_minutes: int = 15,
     ) -> bool:
         """Check if phone was verified in Step 1 within recent minutes."""
-        phone_number = normalize_bd_phone(phone_number)
+        variants = get_bd_phone_variants(phone_number)
         since = datetime.now(timezone.utc) - timedelta(minutes=within_minutes)
         stmt = (
             select(func.count())
             .select_from(OtpLog)
             .where(
-                OtpLog.phone_number == phone_number,
+                OtpLog.phone_number.in_(variants),
                 OtpLog.purpose == purpose,
                 OtpLog.is_verified == True,
                 OtpLog.created_at >= since,
@@ -333,12 +338,12 @@ class AuthRepository:
         window_minutes: int = 10,
     ) -> int:
         """Count OTPs generated for phone in window for rate limiting."""
-        phone_number = normalize_bd_phone(phone_number)
+        variants = get_bd_phone_variants(phone_number)
         since = datetime.now(timezone.utc) - timedelta(minutes=window_minutes)
         stmt = (
             select(func.count())
             .select_from(OtpLog)
-            .where(OtpLog.phone_number == phone_number, OtpLog.created_at >= since)
+            .where(OtpLog.phone_number.in_(variants), OtpLog.created_at >= since)
         )
         result = await self.db.execute(stmt)
         val = await self._extract_scalar(result, 0)

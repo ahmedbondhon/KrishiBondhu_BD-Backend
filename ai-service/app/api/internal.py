@@ -32,9 +32,15 @@ from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/internal/v1")
 
+from dotenv import load_dotenv
+
+load_dotenv()
+if not os.getenv("GEMINI_API_KEY"):
+    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "backend", ".env"))
+
 # ── Gemini Client Setup ───────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 if GEMINI_API_KEY:
     _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -60,9 +66,11 @@ class ImageQualityCheckResponse(BaseModel):
 class CropDiagnosisPredictRequest(BaseModel):
     case_id: str
     crop_id: Optional[str] = None
-    storage_path: str
+    crop_name: Optional[str] = None
+    storage_path: Optional[str] = None
     image_base64: Optional[str] = Field(None, description="Base64 encoded image data")
     image_mime_type: Optional[str] = Field("image/jpeg", description="MIME type of the image")
+    user_symptoms: Optional[List[str]] = Field(default=None, description="Symptoms reported by user")
 
 
 class TopPrediction(BaseModel):
@@ -77,45 +85,197 @@ class CropDiagnosisPredictResponse(BaseModel):
     model_name: str
     model_version: str
     primary_issue_code: Optional[str]
+    primary_issue_label: Optional[str] = None
+    confidence_level: str  # high | medium | low | uncertain
     confidence_score: float
     urgency_level: str
-    top_predictions: List[TopPrediction]
+    status: str  # confirmed | probable | unidentified | unsupported | healthy
+    badge_text_bn: str
+    badge_variant: str
+    requires_expert_review: bool
+    show_healthy_meter: bool
+    visible_symptoms: List[str] = []
+    top_predictions: List[TopPrediction] = []
     processing_time_ms: int
     diagnosis_summary_bn: Optional[str] = None
     treatment_advice_bn: Optional[str] = None
+    prevention_bn: Optional[str] = None
     metadata: Dict[str, Any] = {}
 
 
-# ── Gemini Diagnosis Prompt ───────────────────────────────
-DIAGNOSIS_PROMPT = """You are an expert agricultural plant pathologist specializing in crops grown in Bangladesh (potato, tomato, chili, rice, jute).
+# In-memory LRU/TTL cache by image hash (SHA-256)
+_DIAGNOSIS_CACHE: Dict[str, dict] = {}
 
-Analyze this crop image carefully and provide a structured diagnosis.
+
+# ── Gemini Diagnosis Prompt (Chain-of-Thought: Symptoms First) ───────
+DIAGNOSIS_PROMPT = """You are an expert agricultural plant pathologist specializing in crop disease diagnosis for Bangladesh (potato, tomato, chili, rice, jute, maize, etc.).
+
+Analyze this crop image step-by-step following strict chain-of-thought clinical diagnosis:
+
+STEP 1: INSPECTION OF PLANT SPECIMEN & PARTS
+- Identify which plant part is shown: "leaf", "stem", "tuber", "fruit", "root", "whole_plant", or "other".
+- Note if this specimen is supported for diagnosis: e.g. clear leaves, stems, or fruits are supported. If it is an out-of-scope, unidentifiable, or heavily degraded sample, set is_supported_specimen to false.
+
+STEP 2: OBSERVATION OF SYMPTOMS (MUST BE DONE BEFORE ASSIGNING ANY LABEL)
+- Carefully inspect the image for ANY abnormal signs: spots, circular concentric lesions, dark necrotic patches, yellowing chlorosis, white/grey fungal mildew, leaf curling, wilting, blight, stem rot, or insect damage.
+- List all visible abnormalities in the "visible_symptoms" list. If the plant is completely spotless, vibrant, and flawless, leave this list empty.
+- Set "has_abnormalities" to true if ANY spots, lesions, discoloration, or rotting are visible; otherwise false.
+
+STEP 3: HEALTH ASSESSMENT (STRICT RULE)
+- "is_healthy" can ONLY be true if "has_abnormalities" is FALSE and "visible_symptoms" is EMPTY.
+- RULE: Even if 80% or 90% of the leaf is green, IF THERE IS EVEN A SINGLE NECROTIC SPOT OR LESION, "is_healthy" MUST BE FALSE! NEVER label a plant as healthy when visible lesions/spots exist.
+
+STEP 4: DISEASE IDENTIFICATION
+- If "is_healthy" is true: primary_issue_code = "HEALTHY", primary_issue_label = "Healthy Plant", confidence_level = "high".
+- If "has_abnormalities" is true: identify the specific disease from the symptoms:
+  * For potato: POTATO_EARLY_BLIGHT (Alternaria, target-like brown spots), POTATO_LATE_BLIGHT (Phytophthora, water-soaked dark lesions), POTATO_VIRUS, SCAB.
+  * For tomato: TOMATO_EARLY_BLIGHT, TOMATO_LATE_BLIGHT, TOMATO_LEAF_CURL, TOMATO_SEPTORIA.
+  * For chili: CHILI_LEAF_CURL, CHILI_ANTHRACNOSE, BACTERIAL_LEAF_SPOT.
+  * For rice: RICE_BLAST, BROWN_SPOT, SHEATH_BLIGHT.
+  * If symptoms are visible but cannot be pinpointed with certainty: primary_issue_code = "UNIDENTIFIED", primary_issue_label = "Unidentified Disease", confidence_level = "uncertain".
+- If the specimen is out of scope / unsupported (e.g. unrecognizable tuber or non-crop): primary_issue_code = "UNSUPPORTED", primary_issue_label = "Unsupported Specimen", confidence_level = "uncertain".
+
+STEP 5: CONFIDENCE LEVEL (DO NOT GUESS PERCENTAGES)
+- Assign confidence_level as an ENUM based on clarity:
+  * "high": Clear textbook symptoms matching a specific disease.
+  * "medium": Likely match, but symptoms could overlap with another condition.
+  * "low": Unclear, blurry, or ambiguous signs.
+  * "uncertain": Unidentified, conflicting, or out of scope.
+
+STEP 6: BANGLA SUMMARY & ADVISORY
+- "diagnosis_summary_bn": 2-3 sentences in Bangla describing the observed symptoms first, followed by the clinical finding.
+- "treatment_advice_bn": Actionable Bangla remedy. (If uncertain or unsupported, write "সঠিক নিশ্চিতকরণের জন্য নমুনাটি কৃষি বিশেষজ্ঞের কাছে পাঠানোর পরামর্শ দেওয়া হচ্ছে।").
+- "prevention_bn": Preventive farm management tips in Bangla.
 
 Return your response as a valid JSON object with EXACTLY this structure:
 {
-  "primary_issue_code": "ISSUE_CODE_HERE",
-  "primary_issue_label": "English disease name",
-  "confidence_score": 0.85,
+  "plant_part": "leaf",
+  "is_supported_specimen": true,
+  "visible_symptoms": ["বিকাশমান বাদামী দাগ", "পাতার কিনারে ক্ষয়"],
+  "has_abnormalities": true,
+  "is_healthy": false,
+  "primary_issue_code": "POTATO_EARLY_BLIGHT",
+  "primary_issue_label": "Potato Early Blight (Alternaria solani)",
+  "confidence_level": "high",
   "urgency_level": "medium",
-  "diagnosis_summary_bn": "Bangla summary of what you see (2-3 sentences)",
-  "treatment_advice_bn": "Bangla treatment advice (2-3 sentences)",
-  "top_predictions": [
-    {"rank": 1, "class_label": "Disease Name", "confidence_score": 0.85, "issue_code": "CODE"},
-    {"rank": 2, "class_label": "Alternative", "confidence_score": 0.10, "issue_code": "CODE2"},
-    {"rank": 3, "class_label": "Alternative", "confidence_score": 0.05, "issue_code": "CODE3"}
-  ]
+  "diagnosis_summary_bn": "পাতায় গাঢ় বাদামী ও কেন্দ্রীভূত রিং বিশিষ্ট আগাম ধসার দাগ পরিলক্ষিত হয়েছে।",
+  "treatment_advice_bn": "ম্যানকোজেব বা রোভরাল প্রতি লিটার পানিতে ২ গ্রাম হারে স্প্রে করুন।",
+  "prevention_bn": "রোগমুক্ত বীজ ব্যবহার করুন এবং সুষম সার প্রয়োগ করুন।"
 }
+Respond with ONLY the JSON object, no markdown or extra text."""
 
-Rules:
-- issue_code must be UPPERCASE_WITH_UNDERSCORES (e.g. POTATO_EARLY_BLIGHT, TOMATO_LATE_BLIGHT, HEALTHY)
-- confidence_score must be between 0.0 and 1.0
-- urgency_level must be one of: low, medium, high, critical
-- Use HEALTHY as issue_code if the plant looks healthy
-- If image is unclear/not a crop, set confidence_score to 0.30 and issue_code to UNKNOWN
-- diagnosis_summary_bn and treatment_advice_bn MUST be in Bengali (Bangla) script
-- All top_predictions confidence scores must sum to approximately 1.0
 
-Respond with ONLY the JSON object, no other text."""
+def finalize_diagnosis(raw_ai: dict, user_symptoms: Optional[List[str]] = None) -> dict:
+    """
+    Single source of truth function for diagnosis finalization.
+    Enforces clinical consistency between symptoms, confidence, and badges.
+    """
+    visible_symptoms = raw_ai.get("visible_symptoms") or []
+    has_abnormalities = bool(raw_ai.get("has_abnormalities"))
+    is_healthy = bool(raw_ai.get("is_healthy", False))
+    user_has_symptoms = bool(user_symptoms and len(user_symptoms) > 0)
+    primary_code = (raw_ai.get("primary_issue_code") or "UNKNOWN").upper().strip()
+    primary_label = raw_ai.get("primary_issue_label") or primary_code.replace("_", " ").title()
+    is_supported = raw_ai.get("is_supported_specimen", True)
+    conf_level = (raw_ai.get("confidence_level") or "uncertain").lower().strip()
+
+    # Map enum to calibrated bounded score
+    score_map = {
+        "high": 0.88,
+        "medium": 0.70,
+        "low": 0.45,
+        "uncertain": 0.25,
+    }
+    confidence_score = score_map.get(conf_level, 0.45)
+
+    # 1. Scope Rule: If specimen is out of scope / unsupported
+    if not is_supported or primary_code in ("UNSUPPORTED", "OUT_OF_SCOPE"):
+        primary_code = "UNSUPPORTED"
+        primary_label = "Unsupported Specimen"
+        conf_level = "uncertain"
+        confidence_score = 0.25
+        status = "unsupported"
+        badge_text_bn = "নমুনা আওতাবহির্ভূত"
+        badge_variant = "secondary"
+        requires_expert = True
+        show_healthy_meter = False
+
+    # 2. Symptom vs Healthy Rule:
+    # If any abnormalities or symptoms are present, it is IMPOSSIBLE to be "HEALTHY"!
+    elif (has_abnormalities or len(visible_symptoms) > 0 or user_has_symptoms):
+        if primary_code in ("HEALTHY", "NORMAL") or is_healthy:
+            # Overwrite contradictory healthy label
+            primary_code = "UNIDENTIFIED"
+            primary_label = "Unidentified Symptom (Spots Observed)"
+            conf_level = "uncertain"
+            confidence_score = 0.35
+
+        if primary_code in ("UNIDENTIFIED", "UNKNOWN"):
+            status = "unidentified"
+            badge_text_bn = "শনাক্ত করা যায়নি — বিশেষজ্ঞ প্রয়োজন"
+            badge_variant = "destructive"
+            requires_expert = True
+            show_healthy_meter = False
+        elif conf_level == "high":
+            status = "confirmed"
+            badge_text_bn = "উচ্চ নিশ্চয়তা"
+            badge_variant = "success"
+            requires_expert = False
+            show_healthy_meter = False
+        elif conf_level == "medium":
+            status = "probable"
+            badge_text_bn = "সম্ভাব্য রোগ"
+            badge_variant = "warning"
+            requires_expert = False
+            show_healthy_meter = False
+        else:
+            status = "unidentified"
+            badge_text_bn = "অনিশ্চিত — বিশেষজ্ঞ প্রয়োজন"
+            badge_variant = "destructive"
+            requires_expert = True
+            show_healthy_meter = False
+
+    # 3. Genuinely Healthy (no symptoms, spotless plant)
+    elif is_healthy and primary_code == "HEALTHY":
+        status = "healthy"
+        badge_text_bn = "সুস্থ ফসল"
+        badge_variant = "success"
+        requires_expert = False
+        show_healthy_meter = True
+        confidence_score = 0.95
+
+    # 4. Default / Fallback
+    else:
+        status = "unidentified"
+        badge_text_bn = "অনিশ্চিত — বিশেষজ্ঞ প্রয়োজন"
+        badge_variant = "destructive"
+        requires_expert = True
+        show_healthy_meter = False
+
+    # Advisory safety rule: if requires_expert, do not show unverified chemical treatment
+    summary_bn = raw_ai.get("diagnosis_summary_bn") or "নমুনাটি যাচাই করা হয়েছে।"
+    treatment_bn = raw_ai.get("treatment_advice_bn") or "কৃষি বিশেষজ্ঞের পরামর্শ নিন।"
+    prevention_bn = raw_ai.get("prevention_bn") or "সুষম সার প্রয়োগ ও পরিচ্ছন্ন চাষাবাদ বজায় রাখুন।"
+
+    if requires_expert:
+        treatment_bn = "নিশ্চিতভাবে রোগ শনাক্ত করা সম্ভব হয়নি। কোনো ওষুধ বা সার প্রয়োগের পূর্বে কৃষিবিদের পরামর্শ নিন।"
+
+    return {
+        "status": status,
+        "badge_text_bn": badge_text_bn,
+        "badge_variant": badge_variant,
+        "primary_issue_code": primary_code,
+        "primary_issue_label": primary_label,
+        "confidence_level": conf_level,
+        "confidence_score": confidence_score,
+        "requires_expert_review": requires_expert,
+        "show_healthy_meter": show_healthy_meter,
+        "visible_symptoms": visible_symptoms,
+        "urgency_level": raw_ai.get("urgency_level", "medium"),
+        "diagnosis_summary_bn": summary_bn,
+        "treatment_advice_bn": treatment_bn,
+        "prevention_bn": prevention_bn,
+    }
 
 
 def _parse_gemini_response(text: str) -> dict:
@@ -180,55 +340,105 @@ async def predict_crop_disease(payload: CropDiagnosisPredictRequest, request: Re
     if _gemini_client and payload.image_base64:
         try:
             import base64
-
-            image_bytes = base64.b64decode(payload.image_base64)
-            mime = payload.image_mime_type or "image/jpeg"
-
+            import hashlib
             import asyncio
 
-            def _call_gemini_predict():
-                return _gemini_client.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=[
-                        DIAGNOSIS_PROMPT,
-                        genai_types.Part.from_bytes(data=image_bytes, mime_type=mime),
-                    ],
-                    config=genai_types.GenerateContentConfig(
-                        temperature=0.1,
-                        max_output_tokens=1024,
-                    ),
+            raw_b64 = payload.image_base64
+            if "data:" in raw_b64 and ";base64," in raw_b64:
+                raw_b64 = raw_b64.split(";base64,", 1)[1]
+
+            image_bytes = base64.b64decode(raw_b64)
+            mime = payload.image_mime_type or "image/jpeg"
+
+            # 1. Cost guard: In-memory cache by image hash (SHA-256)
+            img_hash = hashlib.sha256(image_bytes).hexdigest()
+            cache_key = f"{img_hash}_{payload.crop_name or ''}"
+
+            if cache_key in _DIAGNOSIS_CACHE:
+                cached = _DIAGNOSIS_CACHE[cache_key]
+                return CropDiagnosisPredictResponse(
+                    case_id=payload.case_id,
+                    model_name=model_name,
+                    model_version=GEMINI_MODEL,
+                    **cached,
+                    processing_time_ms=int((time.monotonic() - start) * 1000),
+                    metadata={"cached": True, "image_hash": img_hash},
                 )
 
-            response = await asyncio.to_thread(_call_gemini_predict)
+            # 2. Resilient Gemini call with exponential backoff on 429 rate limit
+            async def _call_gemini_with_backoff(max_retries: int = 3):
+                for attempt in range(max_retries):
+                    try:
+                        return await asyncio.to_thread(
+                            _gemini_client.models.generate_content,
+                            model=GEMINI_MODEL,
+                            contents=[
+                                DIAGNOSIS_PROMPT,
+                                genai_types.Part.from_bytes(data=image_bytes, mime_type=mime),
+                            ],
+                            config=genai_types.GenerateContentConfig(
+                                temperature=0.1,
+                                max_output_tokens=1024,
+                            ),
+                        )
+                    except Exception as exc:
+                        err_str = str(exc).lower()
+                        if ("429" in err_str or "resource_exhausted" in err_str) and attempt < max_retries - 1:
+                            backoff = (2 ** attempt) * 1.5
+                            logging.getLogger("krishibondhu.ai-service").warning(
+                                f"Gemini 429 rate limit hit. Backing off {backoff}s (attempt {attempt + 1}/{max_retries})..."
+                            )
+                            await asyncio.sleep(backoff)
+                        else:
+                            raise exc
 
-            result = _parse_gemini_response(response.text)
-            processing_ms = int((time.monotonic() - start) * 1000)
+            response = await _call_gemini_with_backoff()
+            raw_result = _parse_gemini_response(response.text)
+
+            # 3. Finalize: Single authoritative function deciding status, badge, confidence
+            final = finalize_diagnosis(raw_result, user_symptoms=payload.user_symptoms)
 
             top_preds = [
                 TopPrediction(
-                    rank=p["rank"],
-                    class_label=p["class_label"],
-                    confidence_score=float(p["confidence_score"]),
-                    issue_code=p.get("issue_code"),
+                    rank=1,
+                    class_label=final["primary_issue_label"],
+                    confidence_score=final["confidence_score"],
+                    issue_code=final["primary_issue_code"],
                 )
-                for p in result.get("top_predictions", [])
             ]
+
+            payload_data = {
+                "primary_issue_code": final["primary_issue_code"],
+                "primary_issue_label": final["primary_issue_label"],
+                "confidence_level": final["confidence_level"],
+                "confidence_score": final["confidence_score"],
+                "urgency_level": final["urgency_level"],
+                "status": final["status"],
+                "badge_text_bn": final["badge_text_bn"],
+                "badge_variant": final["badge_variant"],
+                "requires_expert_review": final["requires_expert_review"],
+                "show_healthy_meter": final["show_healthy_meter"],
+                "visible_symptoms": final["visible_symptoms"],
+                "top_predictions": top_preds,
+                "diagnosis_summary_bn": final["diagnosis_summary_bn"],
+                "treatment_advice_bn": final["treatment_advice_bn"],
+                "prevention_bn": final["prevention_bn"],
+            }
+
+            # Cache the finalized result for instant zero-cost re-queries
+            _DIAGNOSIS_CACHE[cache_key] = payload_data
 
             return CropDiagnosisPredictResponse(
                 case_id=payload.case_id,
                 model_name=model_name,
                 model_version=GEMINI_MODEL,
-                primary_issue_code=result.get("primary_issue_code"),
-                confidence_score=float(result.get("confidence_score", 0.5)),
-                urgency_level=result.get("urgency_level", "medium"),
-                top_predictions=top_preds,
-                processing_time_ms=processing_ms,
-                diagnosis_summary_bn=result.get("diagnosis_summary_bn"),
-                treatment_advice_bn=result.get("treatment_advice_bn"),
+                **payload_data,
+                processing_time_ms=int((time.monotonic() - start) * 1000),
                 metadata={
                     "model_used": GEMINI_MODEL,
                     "powered_by": "Google Gemini Vision",
-                    "storage_path": payload.storage_path,
+                    "cached": False,
+                    "image_hash": img_hash,
                 },
             )
 
@@ -255,16 +465,40 @@ async def predict_crop_disease(payload: CropDiagnosisPredictRequest, request: Re
 
     processing_ms = int((time.monotonic() - start) * 1000) + random.randint(200, 500)
 
+    # Use finalize_diagnosis logic for consistent structure
+    raw_mock = {
+        "plant_part_detected": "পাতা",
+        "has_abnormalities": primary["issue_code"] != "HEALTHY",
+        "visible_symptoms": ["লক্ষণ পর্যবেক্ষণ করা হয়েছে"] if primary["issue_code"] != "HEALTHY" else [],
+        "primary_issue_code": primary["issue_code"],
+        "primary_issue_label": primary["class_label"],
+        "confidence_level": "medium",
+        "urgency_level": primary["urgency"],
+        "diagnosis_summary_bn": "ছবি বিশ্লেষণ করা হয়েছে। (মক মোড — সিস্টেম সচল রয়েছে)",
+        "treatment_advice_bn": "সঠিক প্রটোকল অনুযায়ী বালাইনাশক স্প্রে করুন অথবা নিকটস্থ কৃষি কর্মকর্তার সাথে যোগাযোগ করুন।",
+        "prevention_bn": "ক্ষেত পরিচ্ছন্ন রাখুন এবং সঠিক দূরত্ব বজায় রেখে চারা রোপণ করুন।",
+    }
+    final = finalize_diagnosis(raw_mock, user_symptoms=payload.user_symptoms)
+
     return CropDiagnosisPredictResponse(
         case_id=payload.case_id,
         model_name=model_name,
         model_version="mock-v1.0",
-        primary_issue_code=primary["issue_code"],
-        confidence_score=conf,
-        urgency_level=primary["urgency"],
+        primary_issue_code=final["primary_issue_code"],
+        primary_issue_label=final["primary_issue_label"],
+        confidence_level=final["confidence_level"],
+        confidence_score=final["confidence_score"],
+        urgency_level=final["urgency_level"],
+        status=final["status"],
+        badge_text_bn=final["badge_text_bn"],
+        badge_variant=final["badge_variant"],
+        requires_expert_review=final["requires_expert_review"],
+        show_healthy_meter=final["show_healthy_meter"],
+        visible_symptoms=final["visible_symptoms"],
         top_predictions=top_preds,
         processing_time_ms=processing_ms,
-        diagnosis_summary_bn="ছবি বিশ্লেষণ করা হয়েছে। (Mock mode — GEMINI_API_KEY সেট করুন)",
-        treatment_advice_bn="বিশেষজ্ঞের পরামর্শ নিন।",
+        diagnosis_summary_bn=final["diagnosis_summary_bn"],
+        treatment_advice_bn=final["treatment_advice_bn"],
+        prevention_bn=final["prevention_bn"],
         metadata={"model_backend": "mock-fallback", "storage_path": payload.storage_path},
     )

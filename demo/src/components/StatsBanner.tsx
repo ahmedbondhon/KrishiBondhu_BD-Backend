@@ -6,38 +6,39 @@ import { Sparkles, ScanLine, ShieldCheck, HeartPulse } from "lucide-react";
 
 export default function StatsBanner() {
   const language = useAppStore((state) => state.language);
+  const cases = useAppStore((state) => state.cases);
   const isBn = language === "bn";
 
   const stats = [
     {
       icon: ScanLine,
-      title: isBn ? "শনাক্তকৃত কেস" : "Diagnosed Cases",
-      value: "২৮,৪৫০+",
-      sub: isBn ? "আজকে ৩১২টি নতুন" : "+312 Today",
+      title: isBn ? "ডায়াগনসিস সম্পন্ন" : "Diagnosed Cases",
+      value: `${cases.length.toLocaleString("bn-BD")} টি`,
+      sub: isBn ? "আপনার সংরক্ষিত কেস" : "Your recorded cases",
       color: "text-emerald-500",
       bg: "bg-emerald-500/10",
     },
     {
       icon: Sparkles,
-      title: isBn ? "AI মডেল নির্ভুলতা" : "AI Accuracy Rate",
-      value: "৯৬.৮%",
-      sub: isBn ? "ChashiGuard v2.4" : "ChashiGuard v2.4",
+      title: isBn ? "AI ভিশন ইঞ্জিন" : "AI Vision Engine",
+      value: "Gemini 2.5",
+      sub: isBn ? "রিয়েল-টাইম রোগ শনাক্তকরণ" : "Real-time crop vision",
       color: "text-blue-500",
       bg: "bg-blue-500/10",
     },
     {
       icon: ShieldCheck,
-      title: isBn ? "বিশেষজ্ঞ রিভিউ দল" : "Verified Agronomists",
-      value: "৪৫+",
-      sub: isBn ? "২৪/৭ সক্রিয় কৃষিবিদ" : "24/7 Field Support",
+      title: isBn ? "বিশেষজ্ঞ সহায়তা" : "Agronomist Advisory",
+      value: isBn ? "অনুমোদিত" : "Verified",
+      sub: isBn ? "DAE কৃষি কর্মকর্তা যাচাই" : "DAE verified protocols",
       color: "text-amber-500",
       bg: "bg-amber-500/10",
     },
     {
       icon: HeartPulse,
-      title: isBn ? "ফসল সুরক্ষা আওতা" : "Protected Farmlands",
-      value: "১২,০০০+ একর",
-      sub: isBn ? "৬৪ জেলা জুড়ে" : "Across 64 Districts",
+      title: isBn ? "কৃষি হটলাইন" : "National Hotline",
+      value: "১৬১২৩",
+      sub: isBn ? "টোল-ফ্রি কৃষি কল সেন্টার" : "Toll-free agricultural support",
       color: "text-purple-500",
       bg: "bg-purple-500/10",
     },

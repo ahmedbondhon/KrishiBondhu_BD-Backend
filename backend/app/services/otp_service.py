@@ -105,6 +105,7 @@ class IpRateLimiter:
 
 sms_inbox = SmsSimulatorInbox()
 ip_rate_limiter = IpRateLimiter()
+phone_rate_limiter = IpRateLimiter()
 
 _consumed_verification_tokens: set[str] = set()
 
@@ -178,7 +179,7 @@ class OtpService:
         win = settings.otp_rate_limit_window_minutes
         raise HTTPException(
             status_code=429,
-            detail=f"Too many OTP requests for this {target}. Try again after {win} minutes.",
+            detail=f"Too many OTP requests for this {target}. Try again after {win} minutes (নতুন OTP চাওয়ার সীমা অতিক্রম হয়েছে).",
             headers={"Retry-After": str(win * 60)},
         )
 
@@ -186,10 +187,18 @@ class OtpService:
         phone = normalize_bd_phone(phone_number)
         win = settings.otp_rate_limit_window_minutes
 
-        max_phone_attempts = settings.otp_rate_limit_per_phone if not settings.otp_demo_mode else 30
-        max_ip_attempts = settings.otp_rate_limit_per_ip if not settings.otp_demo_mode else 100
+        # Rate limit: max 5 requests per hour (per phone) across login, registration, password reset
+        max_phone_attempts = settings.otp_rate_limit_per_phone
+        max_ip_attempts = settings.otp_rate_limit_per_ip if not settings.otp_demo_mode else 50
 
-        if await self.repo.count_recent_otps_for_phone(phone, window_minutes=win) >= max_phone_attempts:
+        # Check recent OTP generation count in database across all purposes
+        db_count = 0
+        try:
+            db_count = await self.repo.count_recent_otps_for_phone(phone, window_minutes=win)
+        except Exception:
+            pass
+
+        if db_count >= max_phone_attempts or not phone_rate_limiter.check_and_record(phone, max_phone_attempts, win):
             self._raise_rate_limit("phone")
 
         if ip_address and not ip_rate_limiter.check_and_record(ip_address, max_ip_attempts, win):
@@ -223,20 +232,46 @@ class OtpService:
     async def verify_otp(self, phone_number: str, otp_code: str, purpose: str = "registration") -> dict:
         phone = normalize_bd_phone(phone_number)
         record = await self.repo.get_latest_otp(phone_number=phone, purpose=purpose, for_update=True)
-        if not record:
-            raise InvalidOtpError("No pending OTP found for this number. Please request a new OTP.")
-        if record.expires_at < datetime.now(timezone.utc):
-            raise OtpExpiredError("OTP code has expired. Please request a new one.")
-        if record.is_used:
-            raise InvalidOtpError("This OTP has already been used. Please request a new one.")
 
-        is_demo_match = settings.otp_demo_mode and (otp_code.strip() == settings.otp_demo_code)
-        if not is_demo_match and not hmac_verify_otp(otp_code.strip(), record.otp_hash, settings.otp_hmac_secret):
+        if not record:
+            raise InvalidOtpError("No pending OTP found for this number. Please request a new OTP (নতুন OTP চান).")
+        if record.expires_at < datetime.now(timezone.utc):
+            raise OtpExpiredError("OTP code has expired. Please request a new one (নতুন OTP চান).")
+        if record.is_used:
+            raise InvalidOtpError("This OTP has already been used or invalidated. Please request a new one (নতুন OTP চান).")
+
+        # —— Strict Lockout ———————————————————————————————————————
+        # Once an OTP reaches 5 failed attempts (verify_attempts >= max_attempts),
+        # it is permanently invalidated. Even if the user enters the CORRECT OTP
+        # on attempt 6+, it must return 400 (InvalidOtpError) and never succeed (200).
+        if record.verify_attempts >= settings.otp_max_verify_attempts:
+            await self.repo.mark_otp_consumed(record.id)
+            raise InvalidOtpError(
+                "Too many incorrect attempts. This OTP has been permanently invalidated. "
+                "Please request a new OTP (নতুন OTP চান)."
+            )
+
+        # —— Code Verification ——————————————————————————————————————
+        # Demo mode: the fixed demo code always passes, but wrong demo codes
+        # still consume attempts (no free-pass for guessing non-demo codes).
+        otp_stripped = (otp_code or "").strip()
+        is_demo_match = settings.otp_demo_mode and (otp_stripped == settings.otp_demo_code)
+        code_correct = is_demo_match or hmac_verify_otp(otp_stripped, record.otp_hash, settings.otp_hmac_secret)
+
+        if not code_correct:
             await self.repo.increment_otp_attempts(record.id)
-            rem = settings.otp_max_verify_attempts - (record.verify_attempts + 1)
-            if rem <= 0:
-                raise InvalidOtpError("Too many incorrect attempts. This OTP has been invalidated. Please request a new OTP.")
-            raise InvalidOtpError(f"Incorrect OTP code. {rem} attempt(s) remaining.")
+            new_attempts = record.verify_attempts + 1
+            remaining = settings.otp_max_verify_attempts - new_attempts
+
+            if remaining <= 0:
+                # Final wrong attempt: permanently burn the OTP so any concurrent
+                # or subsequent attempts (even correct code) are blocked.
+                await self.repo.mark_otp_consumed(record.id)
+                raise InvalidOtpError(
+                    "Too many incorrect attempts. This OTP has been permanently invalidated. "
+                    "Please request a new OTP (নতুন OTP চান)."
+                )
+            raise InvalidOtpError(f"Incorrect OTP code. {remaining} attempt(s) remaining.")
 
         await self.repo.mark_otp_verified(record.id)
         _safe_create_task(supabase_client.mark_otp_verified(phone, record.otp_hash))

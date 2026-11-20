@@ -39,3 +39,5 @@ venv312/
 .pytest_cache/
 *.zip
 *.patch
+.agents
+Gravitas

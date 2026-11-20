@@ -38,7 +38,7 @@ class Plot(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "plots"
     __table_args__ = {"schema": "farm"}
 
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     area_bigha: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2))
     area_sqm: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2))

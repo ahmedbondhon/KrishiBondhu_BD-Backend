@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { persist } from "zustand/middleware";
 
 export type UserRole = "farmer" | "expert" | "admin";
 export type Language = "bn" | "en";
@@ -88,37 +89,51 @@ interface AppState {
 
   // History & Cases
   cases: DiagnosisCase[];
+  setCases: (cases: DiagnosisCase[]) => void;
   addCase: (c: DiagnosisCase) => void;
   updateCaseStatus: (id: string, status: DiagnosisCase["status"], expertNotes?: string) => void;
 
   // Farm Plots (Farmer feature)
   plots: FarmPlot[];
+  setPlots: (plots: FarmPlot[]) => void;
   addPlot: (plot: FarmPlot) => void;
 }
 
-export const useAppStore = create<AppState>((set) => ({
-  // Default logged in demo user (Farmer)
-  isAuthenticated: true,
-  currentUser: {
-    id: "11000000-0000-0000-0000-000000000001",
-    fullName: "মো: আব্দুল্লাহ",
-    phoneNumber: "01754890387",
-    role: "farmer",
-    division: "রাজশাহী",
-    district: "বগুড়া",
-    upazila: "শিবগঞ্জ",
-  },
-  authModalOpen: false,
-  authModalMode: "login",
-  openAuthModal: (mode) => set({ authModalOpen: true, authModalMode: mode }),
-  closeAuthModal: () => set({ authModalOpen: false }),
-  login: (user) => set({ isAuthenticated: true, currentUser: user, role: user.role }),
-  logout: () => set({ isAuthenticated: false, currentUser: null }),
+export const useAppStore = create<AppState>()(
+  persist(
+    (set) => ({
+      // Default: Not logged in (strict real authentication flow)
+      isAuthenticated: false,
+      currentUser: null,
+      authModalOpen: false,
+      authModalMode: "login",
+      openAuthModal: (mode) => set({ authModalOpen: true, authModalMode: mode }),
+      closeAuthModal: () => set({ authModalOpen: false }),
+      login: (user) => {
+        if (typeof window !== "undefined") {
+          try {
+            localStorage.setItem("kb_user_profile", JSON.stringify(user));
+            localStorage.setItem("kb_user_role", user.role);
+          } catch {}
+        }
+        set({ isAuthenticated: true, currentUser: user, role: user.role });
+      },
+      logout: () => {
+        if (typeof window !== "undefined") {
+          try {
+            localStorage.removeItem("kb_user_profile");
+            localStorage.removeItem("kb_user_role");
+            localStorage.removeItem("kb_access_token");
+            localStorage.removeItem("kb_refresh_token");
+          } catch {}
+        }
+        set({ isAuthenticated: false, currentUser: null, role: "farmer" });
+      },
 
-  role: "farmer",
-  activeTab: "diagnosis",
-  language: "bn",
-  isDark: false,
+      role: "farmer",
+      activeTab: "diagnosis",
+      language: "bn",
+      isDark: false,
   setRole: (role) => set({ role }),
   setActiveTab: (activeTab) => set({ activeTab }),
   setLanguage: (language) => set({ language }),
@@ -155,36 +170,8 @@ export const useAppStore = create<AppState>((set) => ({
   activeCase: null,
   setActiveCase: (activeCase) => set({ activeCase }),
 
-  cases: [
-    {
-      id: "22000000-0000-0000-0000-000000000001",
-      caseNumber: "KB-2026-000412",
-      cropName: "potato",
-      cropNameBn: "আলু",
-      diseaseName: "Late Blight",
-      diseaseNameBn: "আলুর নাবী ধসা (লেট ব্লাইট)",
-      confidence: 0.94,
-      status: "analyzed",
-      imageUrl: "https://images.unsplash.com/photo-1518977676601-b53f82aba655?auto=format&fit=crop&w=600&q=80",
-      createdAt: "২০২৬-১০-২২ ১২:৩০",
-      treatmentBn: "ম্যানকোজেব (Mancozeb) জাতীয় ছত্রাকনাশক প্রতি লিটার পানিতে ২ গ্রাম হারে মিশিয়ে ৭-১০ দিন পর পর স্প্রে করুন।",
-      preventionBn: "জমি সবসময় পরিষ্কার ও আগাছামুক্ত রাখুন। আক্রান্ত পাতা তুলে নষ্ট করে ফেলুন। অতিরিক্ত সেচ পরিহার করুন।",
-    },
-    {
-      id: "22000000-0000-0000-0000-000000000002",
-      caseNumber: "KB-2026-000411",
-      cropName: "chili",
-      cropNameBn: "মরিচ",
-      diseaseName: "Chili Anthracnose",
-      diseaseNameBn: "মরিচের ফল পচা / অ্যানথ্রাকনোজ ও লিফ কার্ল",
-      confidence: 0.68,
-      status: "pending_expert",
-      imageUrl: "https://images.unsplash.com/photo-1588252303782-cb80119abd6d?auto=format&fit=crop&w=600&q=80",
-      createdAt: "২০২৬-১০-২১ ০৯:১৫",
-      treatmentBn: "বিশেষজ্ঞ পর্যালোচনার অপেক্ষায় রয়েছে। আক্রান্ত ফল সংগ্রহ করে ধ্বংস করুন এবং ছত্রাকনাশক স্প্রে করুন।",
-      preventionBn: "সুস্থ প্রত্যয়িত চারা ব্যবহার করুন এবং অতিরিক্ত আর্দ্রতা পরিহার করুন।",
-    },
-  ],
+  cases: [],
+  setCases: (cases) => set({ cases }),
   addCase: (c) =>
     set((state) => {
       const existingIdx = state.cases.findIndex(
@@ -238,34 +225,21 @@ export const useAppStore = create<AppState>((set) => ({
     })),
 
   // Plots
-  plots: [
-    {
-      id: "33000000-0000-0000-0000-000000000001",
-      name: "গোকুল মাঠের আলুর জমি",
-      cropNameBn: "আলু (গ্রানোলা)",
-      areaDecimal: 35,
-      location: "শিবগঞ্জ, বগুড়া",
-      healthStatus: "warning",
-      lastDiagnosisDate: "২০২৬-১০-২২",
-    },
-    {
-      id: "33000000-0000-0000-0000-000000000002",
-      name: "মোকামতলা মরিচ বাগান",
-      cropNameBn: "মরিচ (বারি ঝালকা)",
-      areaDecimal: 40,
-      location: "শিবগঞ্জ, বগুড়া",
-      healthStatus: "good",
-      lastDiagnosisDate: "২০২৬-১০-১৯",
-    },
-    {
-      id: "33000000-0000-0000-0000-000000000003",
-      name: "সাতক্ষীরা টমেটো প্লট",
-      cropNameBn: "টমেটো (বারি টমেটো ১৪)",
-      areaDecimal: 25,
-      location: "সাতক্ষীরা সদর",
-      healthStatus: "good",
-      lastDiagnosisDate: "২০২৬-১০-১৫",
-    },
-  ],
+  plots: [],
+  setPlots: (plots) => set({ plots }),
   addPlot: (plot) => set((state) => ({ plots: [plot, ...state.plots] })),
-}));
+    }),
+    {
+      name: "krishibondhu_app_storage",
+      partialize: (state) => ({
+        isAuthenticated: state.isAuthenticated,
+        currentUser: state.currentUser,
+        role: state.role,
+        language: state.language,
+        isDark: state.isDark,
+        cases: state.cases,
+        plots: state.plots,
+      }),
+    }
+  )
+);

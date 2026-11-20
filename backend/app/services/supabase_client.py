@@ -4,12 +4,13 @@
 # ============================================================================
 
 import logging
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from app.core.config import get_settings
-from app.core.security import normalize_bd_phone
+from app.core.security import get_bd_phone_variants, normalize_bd_phone, to_local_bd_phone
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,13 @@ class SupabaseClient:
         return None
 
     async def get_user_by_phone(self, phone: str) -> dict[str, Any] | None:
-        return await self._get_user(f"phone_number=eq.{normalize_bd_phone(phone)}")
+        variants = get_bd_phone_variants(phone)
+        for v in variants:
+            encoded_v = urllib.parse.quote(v)
+            user = await self._get_user(f"phone_number=eq.{encoded_v}")
+            if user:
+                return user
+        return None
 
     async def get_user_by_email(self, email: str) -> dict[str, Any] | None:
         return await self._get_user(f"email=eq.{email}")
@@ -84,7 +91,7 @@ class SupabaseClient:
 
     async def create_user(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         if payload.get("phone_number"):
-            payload["phone_number"] = normalize_bd_phone(payload["phone_number"])
+            payload["phone_number"] = to_local_bd_phone(payload["phone_number"])
         data = await self._request("POST", "users", json=payload)
         if not data and "preferred_communication" in payload:
             fallback = {k: v for k, v in payload.items() if k != "preferred_communication"}
@@ -94,6 +101,11 @@ class SupabaseClient:
     async def update_last_login(self, user_id: str) -> bool:
         now_iso = datetime.now(timezone.utc).isoformat()
         return bool(await self._request("PATCH", f"users?id=eq.{user_id}", json={"last_login_at": now_iso}))
+
+    async def update_phone_verified(self, user_id: str, verified: bool = True) -> bool:
+        """Mark a user's phone as verified in Supabase."""
+        return bool(await self._request("PATCH", f"users?id=eq.{user_id}", json={"phone_verified": verified}))
+
 
     async def record_login_attempt(self, user_id: str, ip: str | None, user_agent: str | None, success: bool) -> None:
         await self._request("POST", "login_attempts", json={
@@ -113,8 +125,15 @@ class SupabaseClient:
         return bool(await self._request("PATCH", f"users?id=eq.{user_id}", json=cleaned))
 
     async def update_user_password(self, phone: str, password_hash: str) -> bool:
-        phone = normalize_bd_phone(phone)
-        return bool(await self._request("PATCH", f"users?phone_number=eq.{phone}", json={"password_hash": password_hash}))
+        user = await self.get_user_by_phone(phone)
+        if user and "id" in user:
+            return bool(await self._request("PATCH", f"users?id=eq.{user['id']}", json={"password_hash": password_hash}))
+        for v in get_bd_phone_variants(phone):
+            encoded_v = urllib.parse.quote(v)
+            res = await self._request("PATCH", f"users?phone_number=eq.{encoded_v}", json={"password_hash": password_hash})
+            if res:
+                return True
+        return False
 
     async def update_user_status(self, user_id: str, status: str) -> bool:
         return bool(await self._request("PATCH", f"users?id=eq.{user_id}", json={"status": status, "is_active": status == "active"}))
@@ -124,15 +143,19 @@ class SupabaseClient:
 
     async def record_otp(self, phone: str, otp_hash: str, expires_at: datetime) -> bool:
         return bool(await self._request("POST", "otp_logs", json={
-            "phone_number": normalize_bd_phone(phone),
+            "phone_number": to_local_bd_phone(phone),
             "otp_hash": otp_hash,
             "expires_at": expires_at.isoformat(),
             "is_verified": False,
         }))
 
     async def mark_otp_verified(self, phone: str, otp_hash: str) -> bool:
-        phone = normalize_bd_phone(phone)
-        return bool(await self._request("PATCH", f"otp_logs?phone_number=eq.{phone}&otp_hash=eq.{otp_hash}", json={"is_verified": True}))
+        for v in get_bd_phone_variants(phone):
+            encoded_v = urllib.parse.quote(v)
+            res = await self._request("PATCH", f"otp_logs?phone_number=eq.{encoded_v}&otp_hash=eq.{otp_hash}", json={"is_verified": True})
+            if res:
+                return True
+        return False
 
     async def record_user_consent(self, user_id: str, code: str, ip: str | None, ua: str | None, is_granted: bool = True) -> None:
         ct = await self._request("GET", f"consent_types?code=eq.{code}")

@@ -30,6 +30,7 @@ import {
   getUpazilasByDistrict,
   getUnionsByUpazila,
 } from "@/lib/geoDatabase";
+import { BACKEND_URL } from "@/lib/api";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -103,7 +104,7 @@ export default function RegisterPage() {
     setUnionId(uns[0]?.id || "");
   };
 
-  const handleSendOtp = (e: React.FormEvent) => {
+  const handleSendOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg("");
 
@@ -127,26 +128,46 @@ export default function RegisterPage() {
       return;
     }
 
-    // Generate simulated 6-digit OTP
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    setSimulatedOtp(code);
-    setStep("otp");
+    setIsLoading(true);
+    try {
+      // 1. Call Backend to send real OTP (or return demo OTP in development mode)
+      const res = await fetch(`${BACKEND_URL}/api/v1/auth/otp/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone_number: cleanPhone, purpose: "registration" }),
+      });
+      const data = await res.json();
+
+      if (!res.ok || data.success === false) {
+        if (data?.otp_code || data?.demo_otp) {
+          setSimulatedOtp(data.otp_code || data.demo_otp);
+        } else {
+          const msg = data?.detail?.message_bn || data?.error?.message_bn || data?.detail || (isBn ? "OTP পাঠাতে সমস্যা হয়েছে।" : "Failed to send OTP.");
+          setErrorMsg(typeof msg === "string" ? msg : JSON.stringify(msg));
+          setIsLoading(false);
+          return;
+        }
+      } else if (data?.data?.otp_code) {
+        setSimulatedOtp(data.data.otp_code);
+      } else {
+        const code = Math.floor(100000 + Math.random() * 900000).toString();
+        setSimulatedOtp(code);
+      }
+      setStep("otp");
+    } catch {
+      // Backend not reachable, fallback to simulated OTP
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      setSimulatedOtp(code);
+      setStep("otp");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleVerifyAndRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setErrorMsg("");
-
-    if (otpCode !== simulatedOtp && otpCode !== "123456") {
-      setErrorMsg(
-        isBn
-          ? "ওটিপি (OTP) কোডটি সঠিক নয়। দয়া করে পুনরায় দিন।"
-          : "Invalid OTP code. Please try again."
-      );
-      setIsLoading(false);
-      return;
-    }
 
     const cleanPhone = phoneNumber.replace(/[^0-9]/g, "");
     const selectedDivObj = GEO_DIVISIONS.find((d) => d.id === divisionId);
@@ -155,35 +176,76 @@ export default function RegisterPage() {
     const selectedUnionObj = currentUnions.find((un) => un.id === unionId);
 
     try {
-      // 1. First attempt registration through FastAPI Backend
-      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+      // 1. Verify OTP with Backend to get verification_token
+      let verificationToken = "";
       try {
-        const backendResp = await fetch(`${backendUrl}/api/v1/auth/register`, {
+        const verifyRes = await fetch(`${BACKEND_URL}/api/v1/auth/otp/verify`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             phone_number: cleanPhone,
-            password: password,
-            full_name: fullName,
-            role: selectedRole,
-            division_id: divisionId || undefined,
-            district_id: districtId || undefined,
-            upazila_id: upazilaId || undefined,
-            union_id: unionId || undefined,
+            otp_code: otpCode,
+            purpose: "registration",
           }),
         });
+        const verifyData = await verifyRes.json();
+        if (verifyRes.ok && verifyData.success !== false) {
+          verificationToken =
+            verifyData?.data?.verification_token ||
+            verifyData?.verification_token ||
+            "";
+        }
+      } catch {
+        // Backend verification network error, fallback
+      }
+
+      // Check OTP match locally if backend verification token wasn't returned
+      if (!verificationToken && otpCode !== simulatedOtp && otpCode !== "123456") {
+        setErrorMsg(
+          isBn
+            ? "ওটিপি (OTP) কোডটি সঠিক নয়। দয়া করে পুনরায় দিন।"
+            : "Invalid OTP code. Please try again."
+        );
+        setIsLoading(false);
+        return;
+      }
+
+      // 2. Attempt registration through FastAPI Backend
+      try {
+        const regPayload = {
+          phone_number: cleanPhone,
+          password: password,
+          full_name: fullName,
+          role: selectedRole,
+          role_code: selectedRole,
+          verification_token: verificationToken || otpCode,
+          otp_code: otpCode,
+          terms_accepted: true,
+          division_id: divisionId || undefined,
+          district_id: districtId || undefined,
+          upazila_id: upazilaId || undefined,
+          union_id: unionId || undefined,
+        };
+
+        const backendResp = await fetch(`${BACKEND_URL}/api/v1/auth/register`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(regPayload),
+        });
+
         if (backendResp.ok) {
           const resData = await backendResp.json();
           const authData = resData.data || resData;
-          if (authData?.user) {
-            const u = authData.user;
-            if (authData.access_token && typeof window !== "undefined") {
-              localStorage.setItem("kb_access_token", authData.access_token);
+          if (authData?.user || resData?.user) {
+            const u = authData?.user || resData?.user || authData;
+            const accessToken = authData.access_token || resData.tokens?.access_token || authData.tokens?.access_token;
+            if (accessToken && typeof window !== "undefined") {
+              localStorage.setItem("kb_access_token", accessToken);
             }
             login({
-              id: u.id,
-              fullName: u.full_name,
-              phoneNumber: u.phone_number,
+              id: u.id || "user-" + cleanPhone,
+              fullName: u.full_name || fullName,
+              phoneNumber: u.phone_number || cleanPhone,
               role: selectedRole,
               division: selectedDivObj?.nameBn || "রাজশাহী",
               district: selectedDistObj?.nameBn || "বগুড়া",
@@ -243,46 +305,44 @@ export default function RegisterPage() {
         }),
       });
 
-      let registeredUserId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "11000000-0000-0000-0000-000000000099";
       if (insertResp.ok) {
         const createdUsers = await insertResp.json();
-        if (createdUsers?.[0]?.id) {
-          registeredUserId = createdUsers[0].id;
-        }
+        const registeredUserId = createdUsers?.[0]?.id || "11000000-0000-0000-0000-000000000099";
+
+        // Set auth session only when successfully created in database
+        login({
+          id: registeredUserId,
+          fullName,
+          phoneNumber: cleanPhone,
+          role: selectedRole,
+          division: selectedDivObj?.nameBn || "রাজশাহী",
+          district: selectedDistObj?.nameBn || "বগুড়া",
+          upazila: selectedUpzObj?.nameBn || "শেরপুর",
+        });
+        setRole(selectedRole);
+
+        if (selectedRole === "expert") router.push("/expert");
+        else router.push("/");
       } else {
         const errDetail = await insertResp.text();
         console.error("Supabase user insert failed:", errDetail);
+        setErrorMsg(
+          isBn
+            ? "রেজিস্ট্রেশন ডাটাবেজে সংরক্ষণ করা যায়নি। মোবাইল নম্বরটি ইতিমধ্যে ব্যবহৃত হয়ে থাকতে পারে।"
+            : "Registration could not be saved to database. The mobile number may already exist."
+        );
+        setIsLoading(false);
+        return;
       }
-
-      // Set auth session
-      login({
-        id: registeredUserId,
-        fullName,
-        phoneNumber: cleanPhone,
-        role: selectedRole,
-        division: selectedDivObj?.nameBn || "রাজশাহী",
-        district: selectedDistObj?.nameBn || "বগুড়া",
-        upazila: selectedUpzObj?.nameBn || "শেরপুর",
-      });
-      setRole(selectedRole);
-
-      if (selectedRole === "expert") router.push("/expert");
-      else router.push("/");
     } catch (err) {
       console.error("Registration error:", err);
-      const fallbackId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : "11000000-0000-0000-0000-000000000099";
-      login({
-        id: fallbackId,
-        fullName,
-        phoneNumber: cleanPhone,
-        role: selectedRole,
-        division: selectedDivObj?.nameBn || "রাজশাহী",
-        district: selectedDistObj?.nameBn || "বগুড়া",
-        upazila: selectedUpzObj?.nameBn || "শেরপুর",
-      });
-      setRole(selectedRole);
-      if (selectedRole === "expert") router.push("/expert");
-      else router.push("/");
+      setErrorMsg(
+        isBn
+          ? "নিবন্ধন প্রক্রিয়া সম্পন্ন করা যায়নি। অনুগ্রহ করে সার্ভার সংযোগ পরীক্ষা করে আবার চেষ্টা করুন।"
+          : "Could not complete registration. Please check your connection and try again."
+      );
+      setIsLoading(false);
+      return;
     }
   };
 

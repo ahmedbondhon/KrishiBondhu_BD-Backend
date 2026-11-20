@@ -39,7 +39,7 @@ class SystemFile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "files"
     __table_args__ = {"schema": "system"}
 
-    uploaded_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
+    uploaded_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="SET NULL"))
     original_name: Mapped[str] = mapped_column(String(255), nullable=False)
     storage_path: Mapped[str] = mapped_column(Text, nullable=False)
     bucket_name: Mapped[str] = mapped_column(String(100), default="krishibondhu-uploads", nullable=False)
@@ -79,7 +79,7 @@ class AuditLog(Base, UUIDPrimaryKeyMixin):
     __tablename__ = "audit_logs"
     __table_args__ = {"schema": "system"}
 
-    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
+    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="SET NULL"))
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     entity_name: Mapped[str] = mapped_column(String(100), nullable=False)
     entity_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True))
@@ -108,7 +108,7 @@ class Notification(Base, UUIDPrimaryKeyMixin):
     __table_args__ = {"schema": "system"}
 
     user_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="CASCADE"), nullable=False
     )
     notification_type: Mapped[str] = mapped_column(
         String(100), nullable=False,

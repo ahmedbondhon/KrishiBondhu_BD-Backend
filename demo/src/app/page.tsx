@@ -22,6 +22,8 @@ import {
   History,
   CheckCircle2,
   LogIn,
+  User,
+  MapPin,
 } from "lucide-react";
 
 export default function Home() {
@@ -31,8 +33,34 @@ export default function Home() {
     isAuthenticated,
     currentUser,
     openAuthModal,
+    plots,
+    cases,
   } = useAppStore();
   const isBn = language === "bn";
+
+  useEffect(() => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("kb_access_token") : null;
+    if (!token || !isAuthenticated) return;
+
+    fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000"}/api/v1/farmer/profile`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const u = data?.data || data?.profile;
+        if (u && currentUser) {
+          if (u.full_name && u.full_name !== currentUser.fullName) {
+            useAppStore.getState().login({
+              ...currentUser,
+              fullName: u.full_name,
+              division: u.division || currentUser.division,
+              district: u.district || currentUser.district,
+            });
+          }
+        }
+      })
+      .catch(() => {});
+  }, [isAuthenticated]);
 
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-b from-background via-emerald-50/20 to-background dark:via-emerald-950/10">
@@ -122,6 +150,120 @@ export default function Home() {
             )}
           </div>
         </div>
+
+        {/* Logged-in User Profile & Overview Widget */}
+        {isAuthenticated && currentUser && (
+          <Card className="border border-emerald-500/30 bg-card/90 backdrop-blur shadow-md overflow-hidden">
+            <div className="bg-gradient-to-r from-emerald-600/15 via-teal-600/10 to-transparent p-5 sm:p-6 flex flex-col md:flex-row md:items-center justify-between gap-5 border-b border-border/60">
+              <div className="flex items-start sm:items-center gap-4">
+                <div className="h-14 w-14 rounded-2xl bg-gradient-to-tr from-emerald-600 to-green-500 flex items-center justify-center text-white text-xl font-black shadow-md shadow-emerald-600/20 shrink-0">
+                  {currentUser.fullName ? currentUser.fullName.charAt(0).toUpperCase() : <User className="h-7 w-7" />}
+                </div>
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-xl sm:text-2xl font-black text-foreground">
+                      {currentUser.fullName}
+                    </h2>
+                    <Badge
+                      variant="outline"
+                      className="bg-emerald-500/10 text-emerald-600 border-emerald-500/30 font-bold text-xs"
+                    >
+                      <CheckCircle2 className="h-3 w-3 mr-1 text-emerald-600" />
+                      {role === "farmer"
+                        ? isBn
+                          ? "নিবন্ধিত কৃষক"
+                          : "Verified Farmer"
+                        : role === "expert"
+                        ? isBn
+                          ? "অনুমোদিত কৃষিবিদ"
+                          : "Agronomist Expert"
+                        : isBn
+                        ? "সিস্টেম অ্যাডমিনিস্ট্রেটর"
+                        : "Administrator"}
+                    </Badge>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground font-medium">
+                    <span className="flex items-center gap-1 font-mono text-foreground/80">
+                      <PhoneCall className="h-3.5 w-3.5 text-emerald-600" />
+                      {currentUser.phoneNumber}
+                    </span>
+                    <span>•</span>
+                    <span className="flex items-center gap-1">
+                      <MapPin className="h-3.5 w-3.5 text-emerald-600" />
+                      {currentUser.division || "রাজশাহী"}, {currentUser.district || "বগুড়া"}
+                      {currentUser.upazila ? `, ${currentUser.upazila}` : ""}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <Link href="/profile">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 font-bold h-9 text-xs"
+                  >
+                    <User className="h-3.5 w-3.5 mr-1.5" />
+                    <span>{isBn ? "প্রোফাইল দেখুন" : "View Profile"}</span>
+                  </Button>
+                </Link>
+                {role === "farmer" && (
+                  <Link href="/diagnosis">
+                    <Button
+                      size="sm"
+                      className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold h-9 text-xs shadow-md shadow-emerald-600/20"
+                    >
+                      <Search className="h-3.5 w-3.5 mr-1.5" />
+                      <span>{isBn ? "নতুন রোগ স্ক্যান" : "New Diagnosis"}</span>
+                    </Button>
+                  </Link>
+                )}
+              </div>
+            </div>
+
+            {/* Quick Summary Cards (Farms, Diagnoses, Direct Links) */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-border/60 bg-muted/20 text-center">
+              <Link href="/farms" className="p-4 hover:bg-muted/50 transition-colors group">
+                <div className="text-[11px] text-muted-foreground font-semibold flex items-center justify-center gap-1 mb-1">
+                  <Sprout className="h-3.5 w-3.5 text-emerald-600" />
+                  <span>{isBn ? "আমার জমি" : "Farmlands"}</span>
+                </div>
+                <div className="text-xl font-black text-foreground group-hover:text-emerald-600 transition-colors">
+                  {plots.length} {isBn ? "টি প্লট" : "Plots"}
+                </div>
+              </Link>
+              <Link href="/history" className="p-4 hover:bg-muted/50 transition-colors group">
+                <div className="text-[11px] text-muted-foreground font-semibold flex items-center justify-center gap-1 mb-1">
+                  <History className="h-3.5 w-3.5 text-blue-600" />
+                  <span>{isBn ? "ডায়াগনসিস হিস্ট্রি" : "Scans"}</span>
+                </div>
+                <div className="text-xl font-black text-foreground group-hover:text-blue-600 transition-colors">
+                  {cases.length} {isBn ? "টি কেস" : "Cases"}
+                </div>
+              </Link>
+              <div className="p-4">
+                <div className="text-[11px] text-muted-foreground font-semibold flex items-center justify-center gap-1 mb-1">
+                  <CheckCircle2 className="h-3.5 w-3.5 text-teal-600" />
+                  <span>{isBn ? "অ্যাকাউন্ট স্ট্যাটাস" : "Account Status"}</span>
+                </div>
+                <div className="text-sm font-bold text-emerald-600 flex items-center justify-center gap-1">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                  <span>{isBn ? "সক্রিয়" : "Active"}</span>
+                </div>
+              </div>
+              <div className="p-4">
+                <div className="text-[11px] text-muted-foreground font-semibold flex items-center justify-center gap-1 mb-1">
+                  <PhoneCall className="h-3.5 w-3.5 text-amber-500" />
+                  <span>{isBn ? "জরুরি সাপোর্ট" : "Hotline"}</span>
+                </div>
+                <div className="text-lg font-black text-amber-600 dark:text-amber-400">
+                  ১৬১২৩
+                </div>
+              </div>
+            </div>
+          </Card>
+        )}
 
         {/* Global Statistics */}
         <StatsBanner />

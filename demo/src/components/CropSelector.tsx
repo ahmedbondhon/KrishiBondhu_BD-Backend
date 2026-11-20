@@ -13,7 +13,6 @@ interface CropOption {
   icon: string;
   varietiesBn: string[];
   commonDiseasesBn: string;
-  sampleImg: string;
 }
 
 export const CROPS: CropOption[] = [
@@ -25,8 +24,6 @@ export const CROPS: CropOption[] = [
     icon: "🥔",
     varietiesBn: ["গ্রানোলা (Granola)", "অ্যাস্টারিক্স (Asterix)", "কার্ডিনাল (Cardinal)"],
     commonDiseasesBn: "নাবী ধসা, আগাম ধসা, মোজাইক",
-    sampleImg:
-      "https://images.unsplash.com/photo-1518977676601-b53f82aba655?auto=format&fit=crop&w=600&q=80",
   },
   {
     id: "tomato",
@@ -36,8 +33,6 @@ export const CROPS: CropOption[] = [
     icon: "🍅",
     varietiesBn: ["বারি টমেটো ১৪ (BARI Tomato 14)", "বারি টমেটো ১৫ (BARI Tomato 15)"],
     commonDiseasesBn: "পাতা কোঁকড়ানো, আর্লি ব্লাইট, ব্যাকটেরিয়াল উইল্ট",
-    sampleImg:
-      "https://images.unsplash.com/photo-1592924357228-91a4daadcfea?auto=format&fit=crop&w=600&q=80",
   },
   {
     id: "chili",
@@ -47,8 +42,6 @@ export const CROPS: CropOption[] = [
     icon: "🌶️",
     varietiesBn: ["বারি ঝালকা (BARI Jhalka)", "বগুড়া স্থানীয় ঝাল (Local Bogura)"],
     commonDiseasesBn: "অ্যানথ্রাকনোজ (ফল পচা), লিফ কার্ল (পাতা কোঁকড়ানো)",
-    sampleImg:
-      "https://images.unsplash.com/photo-1588252303782-cb80119abd6d?auto=format&fit=crop&w=600&q=80",
   },
 ];
 

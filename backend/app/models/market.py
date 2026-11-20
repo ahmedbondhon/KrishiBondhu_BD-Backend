@@ -7,7 +7,7 @@ SQLAlchemy ORM models for the market schema:
 """
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -45,7 +45,7 @@ class GroupSellingOffer(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     offer_code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     initiator_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="CASCADE"), nullable=False
     )
     crop_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("catalog.crops.id", ondelete="RESTRICT"), nullable=False
@@ -86,7 +86,7 @@ class OfferParticipant(Base, UUIDPrimaryKeyMixin):
         UUID(as_uuid=True), ForeignKey("market.group_selling_offers.id", ondelete="CASCADE"), nullable=False
     )
     farmer_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="CASCADE"), nullable=False
     )
     plot_crop_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("farm.plot_crops.id", ondelete="SET NULL")

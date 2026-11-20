@@ -174,39 +174,14 @@ async def login(
         and payload.password == "admin"
     )
     if is_admin_login:
-        from sqlalchemy import select
-        from sqlalchemy.orm import selectinload
-        from app.models.auth import Role
         from app.core.security import create_access_token, create_refresh_token
-
-        result = await db.execute(
-            select(User).options(selectinload(User.role)).join(User.role).where(Role.code.in_(["admin", "tech_admin"]))
-        )
-        admin_user = result.scalars().first()
-        if not admin_user:
-            admin_role = (await db.execute(select(Role).where(Role.code == "admin"))).scalar_one_or_none()
-            if not admin_role:
-                admin_role = Role(code="admin", name="Administrator")
-                db.add(admin_role)
-                await db.flush()
-            admin_user = User(
-                id=uuid.uuid4(),
-                phone_number="+8801999999999",
-                full_name="সিস্টেম অ্যাডমিনিস্ট্রেটর",
-                role_id=admin_role.id,
-                is_active=True,
-                is_verified=True,
-            )
-            admin_user.role = admin_role
-            db.add(admin_user)
-            await db.flush()
-
-        access_token = create_access_token(admin_user.id, "admin")
-        refresh_token = create_refresh_token(admin_user.id)
+        admin_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
+        access_token = create_access_token(admin_id, "admin")
+        refresh_token = create_refresh_token(admin_id)
         user_info = {
-            "id": str(admin_user.id),
-            "phone_number": admin_user.phone_number,
-            "full_name": admin_user.full_name or "System Administrator",
+            "id": str(admin_id),
+            "phone_number": "+8801999999999",
+            "full_name": "সিস্টেম অ্যাডমিনিস্ট্রেটর",
             "role": "admin",
             "is_active": True,
             "is_verified": True,
@@ -541,4 +516,80 @@ async def update_language(
     }
 
 
+@router.get("/users", summary="ইউজার তালিকা (Admin / Supervisor)")
+async def list_users(
+    limit: int = 50,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+):
+    """List registered users with roles and status."""
+    from sqlalchemy import select, func
+    from sqlalchemy.orm import selectinload
+    from app.models.auth import User
+
+    stmt = (
+        select(User)
+        .options(selectinload(User.role))
+        .where(User.is_deleted == False)
+        .order_by(User.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    result = await db.execute(stmt)
+    users = result.scalars().all()
+
+    count_stmt = select(func.count()).select_from(User).where(User.is_deleted == False)
+    total = (await db.execute(count_stmt)).scalar() or 0
+
+    return {
+        "success": True,
+        "total": total,
+        "data": [
+            {
+                "id": str(u.id),
+                "full_name": u.full_name,
+                "phone_number": u.phone_number,
+                "status": u.status,
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+                "roles": {
+                    "code": u.role.code if u.role else "farmer",
+                    "name": u.role.name if u.role else "Farmer",
+                } if u.role else None,
+            }
+            for u in users
+        ],
+    }
+
+
+@router.patch("/users/{user_id}/status", summary="ইউজার স্ট্যাটাস পরিবর্তন (Admin)")
+async def update_user_status(
+    user_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Toggle or update user status between active and suspended."""
+    import uuid
+    from sqlalchemy import select
+    from app.models.auth import User
+
+    body = await request.json()
+    new_status = body.get("status", "active")
+
+    try:
+        uid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user ID format")
+
+    stmt = select(User).where(User.id == uid)
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="ব্যবহারকারী পাওয়া যায়নি।")
+
+    user.status = new_status
+    user.is_active = (new_status == "active")
+    await db.commit()
+    await db.refresh(user)
+
+    return {"success": True, "user_id": str(user.id), "status": user.status}
 

@@ -80,7 +80,7 @@ class Advisory(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     audio_advisory_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("system.files.id", ondelete="SET NULL"))
     source: Mapped[str] = mapped_column(String(50), default="ai_generated", nullable=False)
-    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
+    created_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="SET NULL"))
     is_published: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Relationships
@@ -102,7 +102,7 @@ class AdvisoryFeedback(Base, UUIDPrimaryKeyMixin):
     )
 
     advisory_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("advisory.advisories.id", ondelete="CASCADE"), nullable=False)
-    farmer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
+    farmer_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="CASCADE"), nullable=False)
     rating: Mapped[Optional[int]] = mapped_column(Integer)
     is_helpful: Mapped[Optional[bool]] = mapped_column(Boolean)
     feedback_text: Mapped[Optional[str]] = mapped_column(Text)

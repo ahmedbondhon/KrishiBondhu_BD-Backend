@@ -22,7 +22,14 @@ Internal URL (referenced in backend .env):
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+
+# Load environment variables from .env or ../backend/.env
+load_dotenv()
+if not os.getenv("GEMINI_API_KEY"):
+    load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), "..", "backend", ".env"))
 
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
@@ -68,11 +75,20 @@ Internal service for crop disease detection. NOT publicly exposed.
 - `POST /internal/v1/image-quality/check` — Validate image quality
 - `POST /internal/v1/crop-diagnosis/predict` — AI crop disease prediction
     """,
-    docs_url="/internal/docs",
-    redoc_url="/internal/redoc",
-    openapi_url="/internal/openapi.json",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
     lifespan=lifespan,
 )
+
+@app.get("/", tags=["Root"])
+async def root():
+    return {
+        "status": "healthy",
+        "service": "KrishiBondhu AI Service",
+        "docs_url": "/docs",
+        "model_loaded": getattr(app.state, "model_loaded", False),
+    }
 
 
 # ── Register Internal Routers ─────────────────────────────

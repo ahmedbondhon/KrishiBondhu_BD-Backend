@@ -30,6 +30,7 @@ pymupdf>=1.24.0
 numpy>=1.26.0
 boto3==1.35.28                     # AWS S3 / Supabase S3-compatible API
 httpx>=0.28.1,<1.0.0                      # Async HTTP client (for internal AI service calls)
+Pillow>=10.4.0                       # Image processing (quick diagnosis & vision)
 
 # --- Utilities ---
 python-dotenv==1.0.1

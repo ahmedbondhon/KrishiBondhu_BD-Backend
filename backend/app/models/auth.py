@@ -27,7 +27,7 @@ from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 class Role(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
-    auth.roles — Defines the user roles available in the system.
+    public.roles — Defines the user roles available in the system.
 
     Seeded roles (see database/migrations/014_seed_data.sql):
       - farmer     : End-user farmers submitting crop diagnosis requests
@@ -37,7 +37,7 @@ class Role(Base, UUIDPrimaryKeyMixin, TimestampMixin):
       - tech_admin : Technical system administrators
     """
     __tablename__ = "roles"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = {"schema": "public"}
 
     code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -49,19 +49,19 @@ class Role(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
-    auth.users — All registered users across roles.
+    public.users — All registered users across roles.
 
     Phone number is the primary identifier (Bangladesh mobile-first).
     Geo location fields (division_id, district_id, etc.) are FK references
     to the geo schema, populated when a farmer sets up their profile.
     """
     __tablename__ = "users"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = {"schema": "public"}
 
     phone_number: Mapped[str] = mapped_column(String(20), unique=True, nullable=False)
     password_hash: Mapped[Optional[str]] = mapped_column(String(255))
     full_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    role_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.roles.id", ondelete="RESTRICT"), nullable=False)
+    role_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("public.roles.id", ondelete="RESTRICT"), nullable=False)
 
     # Geographic profile (optional, set during profile setup)
     # Note: DB-level FK constraints exist in SQL migrations; no ORM geo models needed.
@@ -110,12 +110,12 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class ConsentType(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
-    auth.consent_types — Defines the types of consent a user can grant.
+    public.consent_types — Defines the types of consent a user can grant.
 
     Seeded types: terms_of_service, privacy_policy, voice_recording, location_data (also supports account_terms, image_processing, ai_improvement).
     """
     __tablename__ = "consent_types"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = {"schema": "public"}
 
     code: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -127,15 +127,15 @@ class ConsentType(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class UserConsent(Base, UUIDPrimaryKeyMixin):
     """
-    auth.user_consents — Audit trail of user consent decisions.
+    public.user_consents — Audit trail of user consent decisions.
 
     Immutable records: once a consent is granted or revoked, a new record is added.
     """
     __tablename__ = "user_consents"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = {"schema": "public"}
 
-    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
-    consent_type_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.consent_types.id", ondelete="RESTRICT"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="CASCADE"), nullable=False)
+    consent_type_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("public.consent_types.id", ondelete="RESTRICT"), nullable=False)
     is_granted: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
@@ -149,10 +149,10 @@ class UserConsent(Base, UUIDPrimaryKeyMixin):
 
 class OtpLog(Base, UUIDPrimaryKeyMixin):
     """
-    auth.otp_logs — SMS OTP verification log for phone-based auth.
+    public.otp_logs — SMS OTP verification log for phone-based auth.
     """
     __tablename__ = "otp_logs"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = {"schema": "public"}
 
     phone_number: Mapped[str] = mapped_column(String(20), nullable=False)
     otp_code: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
@@ -168,11 +168,11 @@ class OtpLog(Base, UUIDPrimaryKeyMixin):
 class RefreshToken(Base, UUIDPrimaryKeyMixin):
     """Stores issued refresh tokens for rotation and revocation."""
     __tablename__ = "refresh_tokens"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = {"schema": "public"}
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("auth.users.id", ondelete="CASCADE"),
+        ForeignKey("public.users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -188,11 +188,11 @@ class RefreshToken(Base, UUIDPrimaryKeyMixin):
 class LoginAttempt(Base, UUIDPrimaryKeyMixin):
     """Tracks failed login attempts for lockout enforcement."""
     __tablename__ = "login_attempts"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = {"schema": "public"}
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("auth.users.id", ondelete="CASCADE"),
+        ForeignKey("public.users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -212,7 +212,7 @@ class AdminAction(Base, UUIDPrimaryKeyMixin):
 
     actor_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("auth.users.id", ondelete="CASCADE"),
+        ForeignKey("public.users.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     )

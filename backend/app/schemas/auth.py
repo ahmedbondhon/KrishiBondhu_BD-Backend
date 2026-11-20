@@ -26,7 +26,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.core.security import normalize_bd_phone
+from app.core.security import get_bd_phone_variants, normalize_bd_phone, to_local_bd_phone
 
 
 def get_dashboard_path_for_role(role: str) -> str:
@@ -59,6 +59,17 @@ class RegisterRequest(BaseModel):
     @classmethod
     def normalize_phone(cls, v: Any) -> str:
         return normalize_bd_phone(v)
+
+    @model_validator(mode="after")
+    def check_password_by_role(self):
+        """Bug 6 fix: enforce the same password policy here as FarmerAgentRegisterRequest
+        so registration and reset always use the same rules."""
+        role = self.role_code or "farmer"
+        if role == "farmer":
+            validate_farmer_pin(self.password)
+        elif role in ("agent", "expert", "admin", "administrator", "technical_admin"):
+            validate_strong_password(self.password, role.capitalize())
+        return self
 
 
 class LoginRequest(BaseModel):
@@ -268,15 +279,13 @@ class VerifyOtpResponse(BaseModel):
 
 
 def validate_farmer_pin(pin: str) -> str:
-    """Password policy for farmers:
-    - Numeric PIN only (digits 0-9)
+    """Password/PIN policy for farmers (unified across registration and reset):
     - Minimum length 6 (FARMER_PIN_MIN_LEN from config)
+    - Accepts numeric PIN (e.g. 6 digits) or alphanumeric password (min 6 characters)
     """
     min_len = get_settings().farmer_pin_min_len
-    if not pin.isdigit():
-        raise ValueError("Farmer PIN must contain only numeric digits (0-9).")
-    if len(pin) < min_len:
-        raise ValueError(f"Farmer PIN must be at least {min_len} digits.")
+    if not pin or len(pin) < min_len:
+        raise ValueError(f"Farmer password/PIN must be at least {min_len} characters/digits.")
     return pin
 
 
@@ -391,6 +400,10 @@ class FarmerAgentRegisterRequest(BaseModel):
             self.privacy_accepted = self.terms_accepted
         if self.role == "agent":
             validate_strong_password(self.password, "Agent")
+        elif self.role == "expert":
+            # Bug 6 fix: expert password must satisfy the same strong-password policy
+            # as agent/admin so registration and privileged-role reset are consistent.
+            validate_strong_password(self.password, "Expert")
         elif self.role == "farmer":
             validate_farmer_pin(self.password)
         return self
@@ -529,7 +542,11 @@ class ResetPasswordRequest(BaseModel):
         ...,
         min_length=6,
         max_length=128,
-        description="New password (min 8 chars strong for privileged roles) or numeric PIN (min 6 digits for farmers)",
+        description=(
+            "Bug 6: unified password policy enforced in service layer and schemas. "
+            "Farmers: min 6 characters/digits (accepts numeric PIN or alphanumeric password). "
+            "Agents/Experts/Admins: min 8 chars with upper, lower, digit."
+        ),
     )
 
     @field_validator("phone_number")
@@ -537,13 +554,9 @@ class ResetPasswordRequest(BaseModel):
     def check_phone(cls, v: str) -> str:
         return validate_bd_phone(v)
 
-    @field_validator("new_password")
-    @classmethod
-    def check_password_strength(cls, v: str) -> str:
-        min_len = get_settings().farmer_pin_min_len
-        if len(v) < min_len:
-            raise ValueError(f"New password/PIN must be at least {min_len} characters/digits.")
-        return v
+    # NOTE: Do NOT add password strength validation here — the role is unknown
+    # at schema parse time. Full validation (validate_farmer_pin / validate_strong_password)
+    # is performed in AuthService.reset_password() once the role is resolved from the DB.
 
 
 # =========================================================================

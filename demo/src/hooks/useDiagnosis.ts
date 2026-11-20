@@ -89,87 +89,96 @@ export function useDiagnoseCropMutation() {
         return false;
       });
 
-      // 1. Upload crop picture directly to Supabase storage 'crops' folder (only once per picture)
+      // 1. Upload crop picture directly to Supabase storage 'crops' folder
       let finalCropImageUrl = existingCase?.imageUrl || params.image;
-      if (!existingCase && params.image && params.image.startsWith("data:")) {
+      let blob: Blob | null = null;
+      if (params.image && params.image.startsWith("data:")) {
         try {
-          const blob = dataURLtoBlob(params.image);
-          const uploadRes = await uploadToSupabaseStorage("crops", blob);
-          if (uploadRes?.publicUrl) {
-            finalCropImageUrl = uploadRes.publicUrl;
+          blob = dataURLtoBlob(params.image);
+          if (!existingCase) {
+            const uploadRes = await uploadToSupabaseStorage("crops", blob);
+            if (uploadRes?.publicUrl) {
+              finalCropImageUrl = uploadRes.publicUrl;
+            }
           }
         } catch (uploadErr) {
-          console.warn("Could not upload crop image to Supabase storage bucket, using data URL fallback:", uploadErr);
+          console.warn("Image upload warning:", uploadErr);
         }
       }
 
-      // Simulate backend/AI service latency with realistic response
-      await new Promise((res) => setTimeout(res, 1800));
+      // 2. Call REAL FastAPI Backend Diagnosis API
+      const token = typeof window !== "undefined" ? localStorage.getItem("kb_access_token") : null;
+      let diagnosisData: any = null;
 
-      const isLowConfidence = params.symptoms.length === 0 && Math.random() < 0.2;
-      const confidence = isLowConfidence ? 0.62 : 0.94;
-      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      try {
+        const formData = new FormData();
+        const fileBlob = blob || (params.image.startsWith("data:") ? dataURLtoBlob(params.image) : new Blob([]));
+        formData.append("image", fileBlob, `${effectiveCrop}_specimen.jpg`);
+        formData.append("crop_name", effectiveCrop);
+        if (params.symptoms && params.symptoms.length > 0) {
+          formData.append("notes", `লক্ষণসমূহ: ${params.symptoms.join(", ")}`);
+        }
 
-      const diagnoses: Record<
-        string,
-        { name: string; nameBn: string; treatment: string; prevention: string }
-      > = {
-        potato: {
-          name: "Late Blight (Phytophthora infestans)",
-          nameBn: "আলুর নাবী ধসা (লেট ব্লাইট)",
-          treatment:
-            "ডাইমেথোমর্ফ বা ম্যানকোজেব জাতীয় ওষুধ প্রতি লিটার পানিতে ২ গ্রাম মিশিয়ে কুয়াশাচ্ছন্ন আবহাওয়ায় ৭ দিন পর পর স্প্রে করুন।",
-          prevention:
-            "রোগমুক্ত সার্টিফাইড বীজ ব্যবহার করুন, জমিতে পানি জমতে দেবেন না এবং নিয়মিত পর্যবেক্ষণ করুন।",
-        },
-        tomato: {
-          name: "Early Blight (Alternaria solani)",
-          nameBn: "টমেটোর আগাম ধসা রোগ",
-          treatment:
-            "রোভরাল বা রিডোমিল গোল্ড প্রতি লিটার পানিতে ২ গ্রাম হারে ১০ দিন পর পর ২-৩ বার স্প্রে করুন।",
-          prevention:
-            "নিচের আক্রান্ত পাতা ছেঁটে দিন এবং গাছের গোড়ায় সরাসরি পানি দেওয়া থেকে বিরত থাকুন।",
-        },
-        chili: {
-          name: "Chili Anthracnose (Colletotrichum capsici)",
-          nameBn: "মরিচের ফল পচা / অ্যানথ্রাকনোজ ও লিফ কার্ল",
-          treatment:
-            "প্রোপিকোনাজল বা ডাইফেনোকোনাজল প্রতি লিটার পানিতে ১ মিলি হারে স্প্রে করুন। সাদা মাছি দমনে ইমিডাক্লোপ্রিড দিন।",
-          prevention:
-            "সুস্থ ও রোগমুক্ত বীজ বপন করুন, জমিতে অতিরিক্ত আর্দ্রতা জমতে দেবেন না এবং নিয়মিত আগাছা পরিষ্কার রাখুন।",
-        },
-      };
+        const headers: Record<string, string> = {};
+        if (token) headers["Authorization"] = `Bearer ${token}`;
 
-      const selected = diagnoses[effectiveCrop] || diagnoses.potato;
-
-      const newCaseId =
-        existingCase?.id ||
-        (typeof crypto !== "undefined" && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `22000000-0000-0000-0000-${Date.now().toString().slice(-12)}`);
-
-      const caseNumber = existingCase?.caseNumber || `KB-2026-00${randomNum}`;
-      const createdAt =
-        existingCase?.createdAt ||
-        new Date().toLocaleDateString("bn-BD", {
-          hour: "2-digit",
-          minute: "2-digit",
+        const apiRes = await fetch(`${BACKEND_URL}/api/v1/quick-diagnosis`, {
+          method: "POST",
+          headers,
+          body: formData,
         });
 
+        if (apiRes.ok) {
+          const resJson = await apiRes.json();
+          diagnosisData = resJson.data || resJson;
+        } else {
+          const errJson = await apiRes.json().catch(() => ({}));
+          const errMsg =
+            errJson?.detail?.message_bn ||
+            errJson?.detail ||
+            errJson?.message ||
+            "সার্ভার থেকে রোগ বিশ্লেষণ সম্পন্ন করা যায়নি।";
+          throw new Error(typeof errMsg === "string" ? errMsg : JSON.stringify(errMsg));
+        }
+      } catch (backendErr: any) {
+        if (backendErr?.message && !backendErr.message.includes("Failed to fetch") && !backendErr.message.includes("NetworkError")) {
+          throw backendErr;
+        }
+        // If backend server is offline, inform the user clearly
+        throw new Error("ব্যাকএন্ড সার্ভার (http://localhost:8000) সচল নেই। অনুগ্রহ করে ব্যাকএন্ড সার্ভার চালু করুন।");
+      }
+
+      const caseNumber = diagnosisData?.case_number || `KB-2026-${Math.floor(100000 + Math.random() * 900000)}`;
+      const diseaseName = diagnosisData?.issue_name_en || diagnosisData?.issue_name_bn || "Diagnosed Plant Condition";
+      const diseaseNameBn = diagnosisData?.issue_name_bn || diagnosisData?.issue_name_en || "শনাক্তকৃত রোগ";
+      const confidence = Number(diagnosisData?.confidence_score ?? 0.90);
+      const requiresExpert = Boolean(diagnosisData?.requires_expert_review ?? (confidence < 0.75));
+
+      const advisory = diagnosisData?.advisory || {};
+      const treatmentBn =
+        advisory.detailed_treatment_bn ||
+        advisory.summary_bn ||
+        diagnosisData?.treatment_bn ||
+        "কৃষি কর্মকর্তার পরামর্শ অনুযায়ী অনুমোদিত বালাইনাশক স্প্রে করুন।";
+      const preventionBn =
+        advisory.preventive_measures_bn ||
+        diagnosisData?.prevention_bn ||
+        "জমি পরিষ্কার রাখুন এবং সুস্থ প্রত্যয়িত বীজ ব্যবহার করুন।";
+
       const newCase: DiagnosisCase = {
-        id: newCaseId,
+        id: diagnosisData?.case_id || (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `case-${Date.now()}`),
         caseNumber: caseNumber,
         cropName: effectiveCrop,
         cropNameBn: effectiveCropBn,
-        diseaseName: selected.name,
-        diseaseNameBn: selected.nameBn,
+        diseaseName: diseaseName,
+        diseaseNameBn: diseaseNameBn,
         confidence: confidence,
-        status: confidence < 0.75 ? "pending_expert" : "analyzed",
+        status: requiresExpert ? "pending_expert" : "analyzed",
         imageUrl: finalCropImageUrl,
         rawImage: params.image,
-        createdAt: createdAt,
-        treatmentBn: selected.treatment,
-        preventionBn: selected.prevention,
+        createdAt: new Date().toLocaleDateString("bn-BD", { hour: "2-digit", minute: "2-digit" }),
+        treatmentBn: treatmentBn,
+        preventionBn: preventionBn,
         autoSelected: isAutoSelected,
         autoSelectMessageBn: autoSelectMessageBn,
       };
@@ -185,12 +194,56 @@ export function useDiagnoseCropMutation() {
 
 export function useCasesHistoryQuery() {
   const cases = useAppStore((state) => state.cases);
+  const setCases = useAppStore((state) => state.setCases);
 
   return useQuery({
     queryKey: ["casesHistory"],
     queryFn: async () => {
+      const token = typeof window !== "undefined" ? localStorage.getItem("kb_access_token") : null;
+      if (!token) return cases;
+
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/v1/diagnosis-cases?limit=100`, {
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const items: DiagnosisCase[] = (data?.data || []).map(
+            (c: {
+              id: string;
+              case_number: string;
+              status: string;
+              created_at?: string;
+              urgency_level?: string;
+              crop_id?: string;
+              [key: string]: unknown;
+            }) => ({
+              id: c.id,
+              caseNumber: c.case_number,
+              cropName: c.crop_id || "crop",
+              cropNameBn: c.crop_id === "potato" ? "আলু" : c.crop_id === "tomato" ? "টমেটো" : c.crop_id === "chili" ? "মরিচ" : "ফসল",
+              diseaseName: "Diagnosed Condition",
+              diseaseNameBn: "রোগ নির্ণয় সম্পন্ন",
+              confidence: 0.90,
+              status: c.status as DiagnosisCase["status"],
+              imageUrl: "",
+              createdAt: c.created_at ? new Date(c.created_at).toLocaleDateString("bn-BD") : "—",
+              treatmentBn: "—",
+              preventionBn: "—",
+            })
+          );
+          if (items.length > 0) {
+            setCases(items);
+            return items;
+          }
+          return [];
+        }
+      } catch {
+        // Network error — return empty or local
+      }
       return cases;
     },
     initialData: cases,
+    staleTime: 60_000,
   });
 }

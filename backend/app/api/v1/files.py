@@ -28,9 +28,13 @@ Flow diagram:
     │←file bytes─────────────────────────── - │
 """
 
+import uuid
+import logging
 from typing import Optional
 from pydantic import BaseModel
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -59,6 +63,13 @@ class VerifyCropImageRequest(BaseModel):
     selected_crop: str = "potato"
     mime_type: str = "image/jpeg"
     strict_crop_match: bool = False
+
+class DiagnoseCropImageRequest(BaseModel):
+    image_base64: Optional[str] = None
+    storage_path: Optional[str] = None
+    crop_name: Optional[str] = "potato"
+    mime_type: Optional[str] = "image/jpeg"
+    user_symptoms: Optional[list[str]] = None
 
 router = APIRouter(prefix="/files", tags=["File Storage"])
 
@@ -374,3 +385,65 @@ async def verify_crop_image(
         data=verification.model_dump(),
         message=verification.message_bn,
     )
+
+
+@router.post("/diagnose-crop", summary="Diagnose crop disease using AI Vision Service with symptom-first logic")
+async def diagnose_crop(
+    payload: DiagnoseCropImageRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Stateless Crop Disease Diagnosis endpoint.
+    Calls the dedicated AI Vision service with Gemini 3.5 Flash Lite,
+    enforcing:
+    1. Symptom-first inspection (Chain-of-Thought)
+    2. Confidence enum calibrated mapping (high, medium, low, uncertain)
+    3. Finalize diagnosis single source of truth for status and badge
+    4. Cost guard: SHA-256 image caching & exponential backoff
+    """
+    import base64
+    import httpx
+
+    img_b64 = payload.image_base64
+    mime = payload.mime_type or "image/jpeg"
+
+    if not img_b64 and payload.storage_path:
+        img_bytes = await storage_service.get_file_bytes(payload.storage_path)
+        if img_bytes:
+            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+
+    if not img_b64:
+        return error_response(
+            message="No image provided",
+            error_code="NO_IMAGE",
+            status_code=400,
+            details=[{"field": "image_base64", "message_bn": "কোনো ছবি প্রদান করা হয়নি।"}],
+        )
+
+    ai_url = f"{settings.ai_service_url}/internal/v1/crop-diagnosis/predict"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            ai_resp = await client.post(
+                ai_url,
+                json={
+                    "case_id": str(uuid.uuid4()),
+                    "crop_name": payload.crop_name,
+                    "image_base64": img_b64,
+                    "image_mime_type": mime,
+                    "user_symptoms": payload.user_symptoms or [],
+                },
+            )
+            ai_resp.raise_for_status()
+            ai_data = ai_resp.json()
+            return success_response(
+                data=ai_data,
+                message=ai_data.get("diagnosis_summary_bn") or "রোগ নির্ণয় সম্পন্ন হয়েছে।",
+            )
+    except Exception as e:
+        logger.error(f"Failed to communicate with AI service at {ai_url}: {e}")
+        return error_response(
+            message="AI পরিষেবা সাময়িকভাবে অনুপলব্ধ।",
+            error_code="AI_SERVICE_ERROR",
+            status_code=503,
+            details=[{"message_bn": "AI পরিষেবা সাময়িকভাবে অনুপলব্ধ। কিছুক্ষণ পর আবার চেষ্টা করুন।"}],
+        )

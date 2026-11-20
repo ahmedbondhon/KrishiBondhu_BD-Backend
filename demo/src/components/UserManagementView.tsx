@@ -6,6 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { BACKEND_URL } from "@/lib/api";
 import {
   Users,
   Search,
@@ -41,8 +42,31 @@ export default function UserManagementView() {
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
 
-  const fetchSupabaseUsers = async () => {
+  const fetchUsersData = async () => {
     setLoading(true);
+
+    // 1. First attempt to fetch users via FastAPI Backend
+    try {
+      const token = typeof window !== "undefined" ? localStorage.getItem("kb_access_token") : null;
+      const resp = await fetch(`${BACKEND_URL}/api/v1/auth/users?limit=100`, {
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (resp.ok) {
+        const json = await resp.json();
+        if (json.data && Array.isArray(json.data) && json.data.length > 0) {
+          setUsers(json.data);
+          setLoading(false);
+          return;
+        }
+      }
+    } catch {
+      // Backend not reachable, fallback to Supabase direct
+    }
+
+    // 2. Fallback to Supabase direct query
     try {
       const sbUrl = "https://damfsrzakxxccalogghh.supabase.co/rest/v1";
       const sbKey =
@@ -71,38 +95,7 @@ export default function UserManagementView() {
   };
 
   useEffect(() => {
-    let ignore = false;
-    const loadInitialUsers = async () => {
-      try {
-        const sbUrl = "https://damfsrzakxxccalogghh.supabase.co/rest/v1";
-        const sbKey =
-          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRhbWZzcnpha3h4Y2NhbG9nZ2hoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MTk3OTE1MywiZXhwIjoyMTA3NTU1MTUzfQ.1t8QxaKh9GfFjdcz3vRvY-FbYK8Af9b-xDa8t8fSDi8";
-
-        const resp = await fetch(
-          `${sbUrl}/users?select=id,phone_number,full_name,status,created_at,roles(code,name)&order=created_at.desc`,
-          {
-            headers: {
-              apikey: sbKey,
-              Authorization: `Bearer ${sbKey}`,
-              "Content-Type": "application/json",
-            },
-          }
-        );
-
-        if (resp.ok) {
-          const data = await resp.json();
-          if (!ignore) setUsers(data || []);
-        }
-      } catch (e) {
-        console.error("Error fetching users from Supabase:", e);
-      } finally {
-        if (!ignore) setLoading(false);
-      }
-    };
-    loadInitialUsers();
-    return () => {
-      ignore = true;
-    };
+    fetchUsersData();
   }, []);
 
   const toggleUserStatus = async (user: SupabaseUser) => {
@@ -112,7 +105,23 @@ export default function UserManagementView() {
       prev.map((u) => (u.id === user.id ? { ...u, status: nextStatus } : u))
     );
 
-    // Sync to Supabase live database
+    // 1. First attempt update via FastAPI Backend
+    try {
+      const token = typeof window !== "undefined" ? localStorage.getItem("kb_access_token") : null;
+      const backendResp = await fetch(`${BACKEND_URL}/api/v1/auth/users/${user.id}/status`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      if (backendResp.ok) return;
+    } catch {
+      // Backend not reachable, fallback to Supabase
+    }
+
+    // 2. Fallback sync to Supabase live database
     try {
       const sbUrl = "https://damfsrzakxxccalogghh.supabase.co/rest/v1";
       const sbKey =
@@ -199,7 +208,7 @@ export default function UserManagementView() {
 
         <div className="flex items-center gap-3">
           <Button
-            onClick={fetchSupabaseUsers}
+            onClick={fetchUsersData}
             disabled={loading}
             variant="outline"
             size="sm"

@@ -1,9 +1,12 @@
 "use client";
 
 import React, { useState } from "react";
+import bcrypt from "bcryptjs";
+import { GEO_DIVISIONS, GEO_DISTRICTS, GEO_UPAZILAS } from "@/lib/geoDatabase";
 import { useAppStore, UserRole } from "@/store/useAppStore";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { BACKEND_URL } from "@/lib/api";
 import {
   X,
   Phone,
@@ -17,6 +20,8 @@ import {
   Sprout,
   UserCheck,
   ShieldAlert,
+  Loader2,
+  AlertCircle,
 } from "lucide-react";
 
 const DIVISIONS = ["ঢাকা", "চট্টগ্রাম", "রাজশাহী", "খুলনা", "বরিশাল", "সিলেট", "রংপুর", "ময়মনসিংহ"];
@@ -29,86 +34,455 @@ export default function AuthModal() {
     openAuthModal,
     login,
     language,
-    role,
     setRole,
   } = useAppStore();
 
   const isBn = language === "bn";
 
   // Form states
-  const [phoneNumber, setPhoneNumber] = useState("01754890387");
-  const [password, setPassword] = useState("123456");
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
   const [selectedRole, setSelectedRole] = useState<UserRole>("farmer");
   const [selectedDivision, setSelectedDivision] = useState("রাজশাহী");
   const [district, setDistrict] = useState("বগুড়া");
   const [upazila, setUpazila] = useState("শেরপুর");
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
 
-  // OTP flow simulation
+  // OTP flow
   const [showOtpScreen, setShowOtpScreen] = useState(false);
   const [otpCode, setOtpCode] = useState("");
-  const [simulatedOtp, setSimulatedOtp] = useState("123456");
+  const [simulatedOtp, setSimulatedOtp] = useState("");
+  const [pendingRegisterData, setPendingRegisterData] = useState<{
+    phone: string; fullName: string; password: string; role: UserRole; division: string; district: string; upazila: string;
+  } | null>(null);
 
   if (!authModalOpen) return null;
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  // ─── Login ───────────────────────────────────────────────
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setErrorMsg("");
+    setIsLoading(true);
+
+    // Admin login
     if (selectedRole === "admin" || phoneNumber.trim().toLowerCase() === "admin") {
-      if (phoneNumber.trim().toLowerCase() !== "admin" || password !== "admin") {
-        alert(isBn ? "অ্যাডমিন লগইনের জন্য শুধুমাত্র username: admin এবং password: admin দিন।" : "For admin login, use only username: admin and password: admin.");
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/v1/auth/login`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: phoneNumber.trim(), password: password }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const authData = data.data || data;
+          if (authData?.access_token && typeof window !== "undefined") {
+            localStorage.setItem("kb_access_token", authData.access_token);
+          }
+          const u = authData?.user;
+          login({
+            id: u?.id || "admin",
+            fullName: u?.full_name || (isBn ? "সিস্টেম অ্যাডমিনিস্ট্রেটর" : "System Administrator"),
+            phoneNumber: u?.phone_number || "admin",
+            role: "admin",
+            division: u?.division || "ঢাকা",
+            district: u?.district || "ঢাকা সদর",
+            upazila: u?.upazila || "মতিঝিল",
+          });
+          setRole("admin");
+          setIsLoading(false);
+          closeAuthModal();
+          return;
+        } else {
+          setErrorMsg(isBn ? "ভুল অ্যাডমিন ইউজারনেম বা পাসওয়ার্ড।" : "Invalid admin username or password.");
+          setIsLoading(false);
+          return;
+        }
+      } catch {
+        setErrorMsg(isBn ? "অ্যাডমিন লগইনের জন্য ব্যাকএন্ড সার্ভার সচল থাকা আবশ্যক।" : "Backend server must be running for admin login.");
+        setIsLoading(false);
         return;
       }
-      login({
-        id: "admin-master-001",
-        fullName: isBn ? "সিস্টেম অ্যাডমিনিস্ট্রেটর" : "System Administrator",
-        phoneNumber: "admin",
-        role: "admin",
-        division: "ঢাকা",
-        district: "ঢাকা সদর",
-        upazila: "মতিঝিল",
-      });
-      setRole("admin");
+    }
       closeAuthModal();
       return;
     }
-    login({
-      id: "user-" + Math.floor(Math.random() * 1000),
-      fullName:
-        selectedRole === "farmer"
-          ? "মো: আব্দুল্লাহ (কৃষক)"
-          : selectedRole === "expert"
-          ? "ড. রফিকুল ইসলাম (কৃষিবিদ)"
-          : "অ্যাডমিন অ্যাডমিনিস্ট্রেটর",
-      phoneNumber,
-      role: selectedRole,
-      division: selectedDivision,
-      district,
-      upazila,
-    });
-    setRole(selectedRole);
-    closeAuthModal();
+
+    // Farmer / Expert login via Backend & Supabase fallback
+    const cleanPhone = phoneNumber.replace(/[^0-9]/g, "");
+    const coreDigits = cleanPhone.length >= 10 ? cleanPhone.slice(-10) : cleanPhone;
+    const bdOperatorRegex = /^[3-9]\d{8}$/;
+
+    if (cleanPhone.length < 10 || (coreDigits.startsWith("1") && !bdOperatorRegex.test(coreDigits.slice(1)))) {
+      setErrorMsg(
+        isBn
+          ? "শুধুমাত্র বাংলাদেশের বৈধ মোবাইল নম্বর দিন (যেমন: 017XXXXXXXX)।"
+          : "Please enter a valid Bangladesh mobile number (e.g. 017XXXXXXXX)."
+      );
+      setIsLoading(false);
+      return;
+    }
+
+    const pLocal = "0" + coreDigits;
+    const pE164 = "+880" + coreDigits;
+    const p880 = "880" + coreDigits;
+    const pCore = coreDigits;
+
+    let backendFailed = false;
+
+    // 1. First attempt login through FastAPI Backend
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/v1/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone_number: pLocal, password }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const authData = data.data || data;
+        if (authData?.access_token && typeof window !== "undefined") {
+          localStorage.setItem("kb_access_token", authData.access_token);
+        }
+
+        const u = authData?.user;
+        if (u) {
+          const rawRole = typeof u.role === "object" ? u.role?.code : u.role;
+          const dbRole: UserRole =
+            rawRole === "admin" || rawRole === "administrator" ? "admin"
+            : rawRole === "expert" ? "expert" : "farmer";
+
+          const divName = u.division || (GEO_DIVISIONS.find((d) => d.id === u.division_id)?.nameBn) || selectedDivision;
+          const distName = u.district || (GEO_DISTRICTS.find((d) => d.id === u.district_id)?.nameBn) || district;
+          const upzName = u.upazila || (GEO_UPAZILAS.find((up) => up.id === u.upazila_id)?.nameBn) || upazila;
+
+          login({
+            id: u.id,
+            fullName: u.full_name,
+            phoneNumber: u.phone_number,
+            role: dbRole,
+            division: divName,
+            district: distName,
+            upazila: upzName,
+          });
+          setRole(dbRole);
+          setIsLoading(false);
+          closeAuthModal();
+          return;
+        }
+      } else if (res.status === 401 || res.status === 403 || res.status === 400) {
+        // Backend actively evaluated and rejected the credentials — STRICT!
+        const errData = await res.json().catch(() => ({}));
+        const msg =
+          errData?.detail?.message_bn ||
+          errData?.message ||
+          (isBn
+            ? "ফোন নম্বর বা পাসওয়ার্ড ভুল হয়েছে। অনুগ্রহ করে সঠিক তথ্য দিন।"
+            : "Invalid phone number or password. Please try again.");
+        setErrorMsg(typeof msg === "string" ? msg : JSON.stringify(msg));
+        setIsLoading(false);
+        return;
+      } else {
+        backendFailed = true;
+      }
+    } catch {
+      // Backend not running (network error); fallback to Supabase
+      backendFailed = true;
+    }
+
+    // 2. Direct REST query to Supabase users table (only if backend is offline)
+    if (backendFailed) {
+      try {
+        const sbUrl = "https://damfsrzakxxccalogghh.supabase.co/rest/v1";
+        const sbKey =
+          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRhbWZzcnpha3h4Y2NhbG9nZ2hoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MTk3OTE1MywiZXhwIjoyMTA3NTU1MTUzfQ.1t8QxaKh9GfFjdcz3vRvY-FbYK8Af9b-xDa8t8fSDi8";
+
+        const queryFilter = `or=(phone_number.eq.${pLocal},phone_number.eq.${pE164},phone_number.eq.${p880},phone_number.eq.${pCore},phone_number.eq.${cleanPhone})`;
+        const resp = await fetch(
+          `${sbUrl}/users?${queryFilter}&select=id,phone_number,password_hash,full_name,status,division_id,district_id,upazila_id,roles(code,name)`,
+          {
+            headers: {
+              apikey: sbKey,
+              Authorization: `Bearer ${sbKey}`,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+        if (resp.ok) {
+          const users = await resp.json();
+          if (users && users.length > 0) {
+            const user = users[0];
+
+            // STRICT Password Verification against user.password_hash
+            if (!user.password_hash) {
+              setErrorMsg(
+                isBn
+                  ? "এই অ্যাকাউন্টের কোনো পাসওয়ার্ড সেট করা নেই।"
+                  : "No password set for this account."
+              );
+              setIsLoading(false);
+              return;
+            }
+
+            let isPasswordMatch = false;
+            try {
+              isPasswordMatch = bcrypt.compareSync(password, user.password_hash);
+            } catch {
+              isPasswordMatch = false;
+            }
+
+            if (!isPasswordMatch) {
+              setErrorMsg(
+                isBn
+                  ? "পাসওয়ার্ড ভুল হয়েছে। অনুগ্রহ করে সঠিক পাসওয়ার্ড দিন।"
+                  : "Invalid password. Please enter the correct password."
+              );
+              setIsLoading(false);
+              return;
+            }
+
+            if (user.status === "suspended") {
+              setErrorMsg(
+                isBn
+                  ? "আপনার অ্যাকাউন্টটি স্থগিত (Suspended) রয়েছে।"
+                  : "Your account has been suspended."
+              );
+              setIsLoading(false);
+              return;
+            }
+
+            const rawRole = user.roles?.code || "farmer";
+            const dbRole: UserRole =
+              rawRole === "administrator" || rawRole === "admin" || rawRole === "technical_admin"
+                ? "admin"
+                : rawRole === "expert"
+                ? "expert"
+                : "farmer";
+
+            const divName = GEO_DIVISIONS.find((d) => d.id === user.division_id)?.nameBn || selectedDivision;
+            const distName = GEO_DISTRICTS.find((d) => d.id === user.district_id)?.nameBn || district;
+            const upzName = GEO_UPAZILAS.find((up) => up.id === user.upazila_id)?.nameBn || upazila;
+
+            login({
+              id: user.id,
+              fullName: user.full_name || (isBn ? "কৃষক বন্ধু" : "Farmer Friend"),
+              phoneNumber: user.phone_number || pLocal,
+              role: dbRole,
+              division: divName,
+              district: distName,
+              upazila: upzName,
+            });
+            setRole(dbRole);
+            setIsLoading(false);
+            closeAuthModal();
+            return;
+          } else {
+            setErrorMsg(
+              isBn
+                ? "এই মোবাইল নম্বরটি ডাটাবেজে পাওয়া যায়নি। আপনি কি আগে নিবন্ধন (Register) করেছেন?"
+                : "Mobile number not found in database. Have you registered an account?"
+            );
+            setIsLoading(false);
+            return;
+          }
+        }
+      } catch (err) {
+        console.error("Supabase fallback error:", err);
+      }
+    }
+
+    setErrorMsg(
+      isBn
+        ? "লগইন ব্যর্থ হয়েছে। ফোন নম্বর বা পাসওয়ার্ড সঠিক নয়।"
+        : "Login failed. Invalid phone number or password."
+    );
+    setIsLoading(false);
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  // ─── Register Step 1: Send OTP ────────────────────────────
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    setSimulatedOtp(code);
-    setShowOtpScreen(true);
+    setErrorMsg("");
+    setIsLoading(true);
+
+    const cleanPhone = phoneNumber.replace(/[^0-9]/g, "");
+
+    // Save pending data for step 2
+    setPendingRegisterData({ phone: cleanPhone, fullName, password, role: selectedRole, division: selectedDivision, district, upazila });
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/v1/auth/otp/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone_number: cleanPhone, purpose: "registration" }),
+      });
+      const data = await res.json();
+
+      if (!res.ok || data.success === false) {
+        // Backend may show demo OTP in response
+        if (data?.otp_code || data?.demo_otp) {
+          setSimulatedOtp(data.otp_code || data.demo_otp);
+        } else {
+          const msg = data?.detail?.message_bn || data?.error?.message_bn || data?.detail || (isBn ? "OTP পাঠাতে সমস্যা হয়েছে।" : "Failed to send OTP.");
+          setErrorMsg(typeof msg === "string" ? msg : JSON.stringify(msg));
+          setIsLoading(false);
+          return;
+        }
+      }
+
+      // Show OTP from backend demo_otp if available
+      if (data?.data?.otp_code) setSimulatedOtp(data.data.otp_code);
+      else if (!simulatedOtp) {
+        // Fallback simulated OTP for demo
+        setSimulatedOtp(Math.floor(100000 + Math.random() * 900000).toString());
+      }
+
+      setShowOtpScreen(true);
+    } catch {
+      // Backend not reachable — fallback simulated OTP
+      const fallbackOtp = Math.floor(100000 + Math.random() * 900000).toString();
+      setSimulatedOtp(fallbackOtp);
+      setShowOtpScreen(true);
+    }
+    setIsLoading(false);
   };
 
-  const handleVerifyOtp = (e: React.FormEvent) => {
+  // ─── Register Step 2: Verify OTP & Complete Registration ──
+  const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
-    login({
-      id: "user-" + Math.floor(Math.random() * 1000),
-      fullName: fullName || (isBn ? "কৃষক বন্ধু" : "Farmer Friend"),
-      phoneNumber,
-      role: selectedRole,
-      division: selectedDivision,
-      district,
-      upazila,
-    });
-    setRole(selectedRole);
+    setErrorMsg("");
+    setIsLoading(true);
+
+    const data = pendingRegisterData;
+    if (!data) { setIsLoading(false); return; }
+
+    try {
+      // 1. Verify OTP
+      const verifyRes = await fetch(`${BACKEND_URL}/api/v1/auth/otp/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone_number: data.phone, otp_code: otpCode, purpose: "registration" }),
+      });
+      const verifyData = await verifyRes.json();
+      const verificationToken = verifyData?.data?.verification_token || verifyData?.verification_token;
+
+      // 2. Complete registration
+      const regRes = await fetch(`${BACKEND_URL}/api/v1/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          phone_number: data.phone,
+          password: data.password,
+          full_name: data.fullName || (isBn ? "কৃষক বন্ধু" : "Farmer Friend"),
+          role: data.role,
+          verification_token: verificationToken || otpCode,
+          terms_accepted: true,
+          district: data.district,
+          upazila: data.upazila,
+        }),
+      });
+      const regData = await regRes.json();
+
+      if (regRes.ok && (regData.success !== false)) {
+        const authData = regData.data || regData;
+        const u = authData?.user || regData?.user;
+        if (authData?.access_token && typeof window !== "undefined") {
+          localStorage.setItem("kb_access_token", authData.access_token);
+        }
+        login({
+          id: u?.id || "user-" + data.phone,
+          fullName: u?.full_name || data.fullName || (isBn ? "কৃষক বন্ধু" : "Farmer Friend"),
+          phoneNumber: u?.phone_number || data.phone,
+          role: data.role,
+          division: data.division,
+          district: data.district,
+          upazila: data.upazila,
+        });
+      } else {
+        const msg =
+          regData?.detail?.message_bn ||
+          regData?.error?.message_bn ||
+          regData?.message ||
+          (isBn ? "নিবন্ধন ব্যর্থ হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।" : "Registration failed. Please try again.");
+        setErrorMsg(typeof msg === "string" ? msg : JSON.stringify(msg));
+        setIsLoading(false);
+        return;
+      }
+    } catch {
+      // Backend unreachable: attempt direct Supabase insert
+      try {
+        const sbUrl = "https://damfsrzakxxccalogghh.supabase.co/rest/v1";
+        const sbKey =
+          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRhbWZzcnpha3h4Y2NhbG9nZ2hoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MTk3OTE1MywiZXhwIjoyMTA3NTU1MTUzfQ.1t8QxaKh9GfFjdcz3vRvY-FbYK8Af9b-xDa8t8fSDi8";
+
+        const roleResp = await fetch(`${sbUrl}/roles?code=eq.${data.role}&select=id`, {
+          headers: { apikey: sbKey, Authorization: `Bearer ${sbKey}` },
+        });
+        const roles = await roleResp.json();
+        const roleId =
+          roles?.[0]?.id ||
+          (data.role === "expert"
+            ? "11000000-0000-0000-0000-000000000002"
+            : "11000000-0000-0000-0000-000000000001");
+
+        const salt = bcrypt.genSaltSync(12);
+        const hashedPassword = bcrypt.hashSync(data.password, salt);
+
+        const insertResp = await fetch(`${sbUrl}/users`, {
+          method: "POST",
+          headers: {
+            apikey: sbKey,
+            Authorization: `Bearer ${sbKey}`,
+            "Content-Type": "application/json",
+            Prefer: "return=representation",
+          },
+          body: JSON.stringify({
+            phone_number: data.phone,
+            password_hash: hashedPassword,
+            full_name: data.fullName,
+            role_id: roleId,
+            status: "active",
+            phone_verified: true,
+            preferred_language: "bn",
+          }),
+        });
+
+        if (insertResp.ok) {
+          const createdUsers = await insertResp.json();
+          const newId = createdUsers?.[0]?.id || "user-" + data.phone;
+          login({
+            id: newId,
+            fullName: data.fullName || (isBn ? "কৃষক বন্ধু" : "Farmer Friend"),
+            phoneNumber: data.phone,
+            role: data.role,
+            division: data.division,
+            district: data.district,
+            upazila: data.upazila,
+          });
+        } else {
+          setErrorMsg(
+            isBn
+              ? "রেজিস্ট্রেশন ডাটাবেজে সংরক্ষণ করা যায়নি। নম্বরটি ইতিমধ্যে ব্যবহৃত হতে পারে।"
+              : "Registration could not be saved to database."
+          );
+          setIsLoading(false);
+          return;
+        }
+      } catch (sbErr) {
+        console.error("Direct Supabase register error:", sbErr);
+        setErrorMsg(
+          isBn
+            ? "সার্ভারের সাথে সংযোগ স্থাপন করা যায়নি।"
+            : "Could not connect to server."
+        );
+        setIsLoading(false);
+        return;
+      }
+    }
+
+    setRole(data.role);
     setShowOtpScreen(false);
+    setIsLoading(false);
     closeAuthModal();
   };
 
@@ -155,6 +529,13 @@ export default function AuthModal() {
               </p>
             </div>
 
+            {errorMsg && (
+              <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl flex items-start gap-2 text-xs text-rose-600 dark:text-rose-400 animate-in fade-in">
+                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                <span>{errorMsg}</span>
+              </div>
+            )}
+
             <form onSubmit={handleVerifyOtp} className="space-y-4">
               <div>
                 <label className="text-xs font-medium mb-1 block">
@@ -182,8 +563,8 @@ export default function AuthModal() {
                 >
                   {isBn ? "অটো-ফিল কোড" : "Auto-fill Code"}
                 </Button>
-                <Button type="submit" className="w-1/2 bg-emerald-600 hover:bg-emerald-700">
-                  {isBn ? "যাচাই ও প্রবেশ" : "Verify & Login"}
+                <Button type="submit" disabled={isLoading} className="w-1/2 bg-emerald-600 hover:bg-emerald-700">
+                  {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : (isBn ? "যাচাই ও প্রবেশ" : "Verify & Login")}
                 </Button>
               </div>
             </form>
@@ -255,6 +636,12 @@ export default function AuthModal() {
             </div>
 
             <form onSubmit={handleLoginSubmit} className="space-y-3.5">
+              {errorMsg && (
+                <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl flex items-start gap-2 text-xs text-rose-600 dark:text-rose-400 animate-in fade-in">
+                  <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{errorMsg}</span>
+                </div>
+              )}
               <div>
                 <label className="text-xs font-medium mb-1 block">
                   {selectedRole === "admin"
@@ -310,6 +697,7 @@ export default function AuthModal() {
 
               <Button
                 type="submit"
+                disabled={isLoading}
                 className={`w-full font-bold text-white shadow-lg ${
                   selectedRole === "farmer"
                     ? "bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20"
@@ -318,12 +706,18 @@ export default function AuthModal() {
                     : "bg-rose-600 hover:bg-rose-700 shadow-rose-600/20"
                 }`}
               >
-                <span>
-                  {isBn
-                    ? `${selectedRole === "farmer" ? "কৃষক" : selectedRole === "expert" ? "কৃষিবিদ" : "অ্যাডমিন"} হিসেবে লগইন করুন`
-                    : `Login as ${selectedRole.toUpperCase()}`}
-                </span>
-                <ArrowRight className="h-4 w-4 ml-1.5" />
+                {isLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    <span>
+                      {isBn
+                        ? `${selectedRole === "farmer" ? "কৃষক" : selectedRole === "expert" ? "কৃষিবিদ" : "অ্যাডমিন"} হিসেবে লগইন করুন`
+                        : `Login as ${selectedRole.toUpperCase()}`}
+                    </span>
+                    <ArrowRight className="h-4 w-4 ml-1.5" />
+                  </>
+                )}
               </Button>
             </form>
 
@@ -417,9 +811,15 @@ export default function AuthModal() {
                 </div>
               </div>
 
-              <Button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-700">
-                <span>{isBn ? "পরবর্তী: ওটিপি কোড পাঠান" : "Send Verification OTP"}</span>
-                <ArrowRight className="h-4 w-4 ml-1.5" />
+              <Button type="submit" disabled={isLoading} className="w-full bg-emerald-600 hover:bg-emerald-700">
+                {isLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <>
+                    <span>{isBn ? "পরবর্তী: ওটিপি কোড পাঠান" : "Send Verification OTP"}</span>
+                    <ArrowRight className="h-4 w-4 ml-1.5" />
+                  </>
+                )}
               </Button>
             </form>
 

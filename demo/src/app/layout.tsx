@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import QueryProvider from "@/providers/QueryProvider";
+import VoiceAgent from "@/components/VoiceAgent";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -16,7 +17,11 @@ export default function RootLayout({
   return (
     <html lang="bn">
       <body className="min-h-screen bg-background text-foreground antialiased selection:bg-emerald-500 selection:text-white font-sans">
-        <QueryProvider>{children}</QueryProvider>
+        <QueryProvider>
+          {children}
+          {/* 🎙️ Global Voice Command Agent — সব পেজে floating mic button */}
+          <VoiceAgent />
+        </QueryProvider>
       </body>
     </html>
   );

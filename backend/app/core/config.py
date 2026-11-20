@@ -79,9 +79,9 @@ class Settings(BaseSettings):
     otp_demo_mode: bool = True
     otp_demo_code: str = "123456"
     sms_mode: str = "simulator"
-    otp_rate_limit_per_phone: int = 3
+    otp_rate_limit_per_phone: int = 5
     otp_rate_limit_per_ip: int = 10
-    otp_rate_limit_window_minutes: int = 10
+    otp_rate_limit_window_minutes: int = 60
 
     # --- Support & Helpline ---
     support_helpline: str = "16123"

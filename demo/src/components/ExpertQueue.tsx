@@ -1,11 +1,11 @@
 "use client";
 
-import React, { useState } from "react";
-import { useAppStore } from "@/store/useAppStore";
+import React, { useState, useEffect } from "react";
+import { useAppStore, DiagnosisCase } from "@/store/useAppStore";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { BACKEND_URL } from "@/lib/api";
 import {
   Stethoscope,
   CheckCircle,
@@ -13,12 +13,17 @@ import {
   Clock,
   Send,
   UserCheck,
+  Loader2,
+  RefreshCw,
 } from "lucide-react";
 
 export default function ExpertQueue() {
   const { cases, updateCaseStatus, language } = useAppStore();
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [prescriptionNote, setPrescriptionNote] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitSuccess, setSubmitSuccess] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const isBn = language === "bn";
 
   const pendingCases = cases.filter(
@@ -28,15 +33,44 @@ export default function ExpertQueue() {
   const selectedCase =
     cases.find((c) => c.id === selectedCaseId) || pendingCases[0];
 
-  const handleApprove = () => {
+  const handleApprove = async () => {
     if (!selectedCase) return;
-    updateCaseStatus(
-      selectedCase.id,
-      "reviewed",
-      prescriptionNote ||
-        "কৃষিবিদ দ্বারা সরাসরি পর্যবেক্ষণ ও কার্যকর চিকিৎসা সুপারিশ অনুমোদন করা হলো।"
-    );
+    setIsSubmitting(true);
+    setSubmitError("");
+    setSubmitSuccess(false);
+
+    const token = typeof window !== "undefined" ? localStorage.getItem("kb_access_token") : null;
+    const noteText = prescriptionNote ||
+      "কৃষিবিদ দ্বারা সরাসরি পর্যবেক্ষণ ও কার্যকর চিকিৎসা সুপারিশ অনুমোদন করা হলো।";
+
+    if (token) {
+      try {
+        // POST /api/v1/expert/cases/{case_id}/review
+        const res = await fetch(`${BACKEND_URL}/api/v1/expert/cases/${selectedCase.id}/review`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            agreed_with_ai: true,
+            diagnosis_notes_bn: noteText,
+            prescribed_treatment_bn: noteText,
+          }),
+        });
+        if (res.ok) {
+          setSubmitSuccess(true);
+        } else {
+          const err = await res.json().catch(() => ({}));
+          const msg = err?.detail?.message_bn || err?.error?.message_bn || (isBn ? "রিভিউ সংরক্ষণ ব্যর্থ হয়েছে।" : "Review save failed.");
+          setSubmitError(typeof msg === "string" ? msg : JSON.stringify(msg));
+        }
+      } catch {
+        setSubmitError(isBn ? "সার্ভারে সংযোগ করা সম্ভব হচ্ছে না।" : "Cannot connect to server.");
+      }
+    }
+
+    // Always update local store (even if backend failed — UI stays consistent)
+    updateCaseStatus(selectedCase.id, "reviewed", noteText);
     setPrescriptionNote("");
+    setIsSubmitting(false);
   };
 
   return (
@@ -168,13 +202,30 @@ export default function ExpertQueue() {
                 </div>
 
                 <div className="flex items-center justify-end gap-2 pt-2">
+                  {submitError && (
+                    <p className="text-xs text-rose-600 dark:text-rose-400 mr-auto flex items-center gap-1">
+                      <AlertCircle className="h-3.5 w-3.5" />
+                      {submitError}
+                    </p>
+                  )}
+                  {submitSuccess && (
+                    <p className="text-xs text-emerald-600 dark:text-emerald-400 mr-auto flex items-center gap-1">
+                      <CheckCircle className="h-3.5 w-3.5" />
+                      {isBn ? "ব্যাকএন্ডে সংরক্ষিত হয়েছে!" : "Saved to backend!"}
+                    </p>
+                  )}
                   <Button
                     size="sm"
                     variant="emerald"
                     onClick={handleApprove}
+                    disabled={isSubmitting}
                     className="gap-1.5 text-xs font-semibold"
                   >
-                    <CheckCircle className="h-4 w-4" />
+                    {isSubmitting ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <CheckCircle className="h-4 w-4" />
+                    )}
                     {isBn ? "যাচাই সম্পন্ন ও অনুমোদন করুন" : "Verify & Approve"}
                   </Button>
                 </div>

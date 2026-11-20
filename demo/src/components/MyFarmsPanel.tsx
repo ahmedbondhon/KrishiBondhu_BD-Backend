@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useAppStore, FarmPlot } from "@/store/useAppStore";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { BACKEND_URL } from "@/lib/api";
 import {
   Sprout,
   Plus,
@@ -16,10 +17,37 @@ import {
   AlertTriangle,
   CheckCircle2,
   Trash2,
+  Loader2,
+  RefreshCw,
 } from "lucide-react";
 
+// Convert backend PlotResponse → FarmPlot (UI type)
+function backendPlotToFarmPlot(p: {
+  id: string;
+  name: string;
+  area_bigha?: number | null;
+  area_sqm?: number | null;
+  created_at?: string | null;
+  [key: string]: unknown;
+}): FarmPlot {
+  const areaDecimal = p.area_bigha
+    ? Math.round(Number(p.area_bigha) * 33.06) // 1 bigha ≈ 33 decimal
+    : p.area_sqm
+    ? Math.round(Number(p.area_sqm) / 40.47) // 1 decimal ≈ 40.47 sqm
+    : 0;
+  return {
+    id: p.id,
+    name: p.name,
+    cropNameBn: "—",
+    areaDecimal,
+    location: "—",
+    healthStatus: "good",
+    lastDiagnosisDate: p.created_at ? new Date(p.created_at).toLocaleDateString("bn-BD") : "—",
+  };
+}
+
 export default function MyFarmsPanel() {
-  const { plots, addPlot, language, setSelectedCrop } = useAppStore();
+  const { plots, addPlot, language, setSelectedCrop, currentUser } = useAppStore();
   const isBn = language === "bn";
 
   const [showAddForm, setShowAddForm] = useState(false);
@@ -27,11 +55,85 @@ export default function MyFarmsPanel() {
   const [cropNameBn, setCropNameBn] = useState("আলু");
   const [areaDecimal, setAreaDecimal] = useState("30");
   const [location, setLocation] = useState("শিবগঞ্জ, বগুড়া");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isFetching, setIsFetching] = useState(false);
+  const [backendPlots, setBackendPlots] = useState<FarmPlot[]>([]);
+  const [fetchError, setFetchError] = useState("");
+  const [hasFetched, setHasFetched] = useState(false);
 
-  const handleCreatePlot = (e: React.FormEvent) => {
+  // ── Fetch farms from backend on mount ─────────────────────
+  useEffect(() => {
+    const token = typeof window !== "undefined" ? localStorage.getItem("kb_access_token") : null;
+    if (!token) return; // not logged in via backend — use local store
+
+    const fetchPlots = async () => {
+      setIsFetching(true);
+      setFetchError("");
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/v1/farms`, {
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const items: FarmPlot[] = (data?.data || data?.items || []).map(backendPlotToFarmPlot);
+          setBackendPlots(items);
+        } else {
+          setFetchError("");
+        }
+      } catch {
+        setFetchError("");
+      } finally {
+        setIsFetching(false);
+        setHasFetched(true);
+      }
+    };
+
+    fetchPlots();
+  }, []);
+
+  // Merge: show backend plots if available, otherwise local store
+  const displayPlots = backendPlots.length > 0 ? backendPlots : plots;
+
+  // ── Create new farm ────────────────────────────────────────
+  const handleCreatePlot = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
+    setIsSubmitting(true);
 
+    const token = typeof window !== "undefined" ? localStorage.getItem("kb_access_token") : null;
+
+    // Convert decimal to bigha (1 decimal = 0.03025 bigha)
+    const areaBigha = (parseFloat(areaDecimal) || 20) * 0.03025;
+
+    if (token) {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/v1/farms`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({
+            name: name.trim(),
+            area_bigha: areaBigha.toFixed(4),
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const created = data?.data || data;
+          const newPlot = backendPlotToFarmPlot(created);
+          newPlot.cropNameBn = cropNameBn;
+          newPlot.location = location;
+          setBackendPlots((prev) => [newPlot, ...prev]);
+          addPlot(newPlot); // keep local store in sync
+          setName("");
+          setShowAddForm(false);
+          setIsSubmitting(false);
+          return;
+        }
+      } catch {
+        // Backend failed — fallback to local
+      }
+    }
+
+    // Local store fallback (backend not running / no token)
     const newPlot: FarmPlot = {
       id:
         typeof crypto !== "undefined" && crypto.randomUUID
@@ -44,10 +146,10 @@ export default function MyFarmsPanel() {
       healthStatus: "good",
       lastDiagnosisDate: "আজকের তারিখ",
     };
-
     addPlot(newPlot);
     setName("");
     setShowAddForm(false);
+    setIsSubmitting(false);
   };
 
   return (
@@ -64,6 +166,18 @@ export default function MyFarmsPanel() {
               ? "আপনার নিবন্ধিত ফসলি জমি, জমির স্বাস্থ্য ও সাম্প্রতিক ডায়াগনসিস ট্র্যাকিং"
               : "Manage your registered land plots, crop health status and diagnosis records"}
           </p>
+          {isFetching && (
+            <p className="text-[11px] text-primary flex items-center gap-1 mt-1">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {isBn ? "ব্যাকএন্ড থেকে জমির তথ্য আনা হচ্ছে..." : "Loading farms from server..."}
+            </p>
+          )}
+          {hasFetched && backendPlots.length > 0 && (
+            <p className="text-[11px] text-emerald-600 flex items-center gap-1 mt-1">
+              <CheckCircle2 className="h-3 w-3" />
+              {isBn ? `ব্যাকএন্ড থেকে ${backendPlots.length}টি জমি লোড হয়েছে` : `${backendPlots.length} plots loaded from server`}
+            </p>
+          )}
         </div>
 
         <Button
@@ -150,8 +264,8 @@ export default function MyFarmsPanel() {
                 >
                   {isBn ? "বাতিল" : "Cancel"}
                 </Button>
-                <Button type="submit" size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-xs">
-                  {isBn ? "সংরক্ষণ করুন" : "Save Plot"}
+                <Button type="submit" disabled={isSubmitting} size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-xs">
+                  {isSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : (isBn ? "সংরক্ষণ করুন" : "Save Plot")}
                 </Button>
               </div>
             </form>
@@ -160,8 +274,31 @@ export default function MyFarmsPanel() {
       )}
 
       {/* Plots Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {plots.map((plot) => (
+      {displayPlots.length === 0 ? (
+        <Card className="border border-dashed border-border bg-card/40 p-8 text-center space-y-3">
+          <div className="h-12 w-12 rounded-2xl bg-emerald-500/10 text-emerald-600 mx-auto flex items-center justify-center">
+            <Sprout className="h-6 w-6" />
+          </div>
+          <h3 className="font-bold text-base text-foreground">
+            {isBn ? "এখনো কোনো জমি যোগ করা হয়নি" : "No Farmlands Added Yet"}
+          </h3>
+          <p className="text-xs text-muted-foreground max-w-md mx-auto">
+            {isBn
+              ? "আপনার চাষকৃত ফসলের জমি যুক্ত করে নিয়মিত ফসলের স্বাস্থ্য ও ডায়াগনসিস হিস্ট্রি ট্র্যাক করুন।"
+              : "Register your farmlands to monitor crop health and track historical diagnoses."}
+          </p>
+          <Button
+            size="sm"
+            onClick={() => setShowAddForm(true)}
+            className="bg-emerald-600 hover:bg-emerald-700 text-xs font-semibold"
+          >
+            <Plus className="h-4 w-4 mr-1.5" />
+            {isBn ? "প্রথম জমি যোগ করুন" : "Add Your First Plot"}
+          </Button>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {displayPlots.map((plot) => (
           <Card
             key={plot.id}
             className="hover:shadow-md transition-all border-border hover:border-emerald-500/40"
@@ -232,6 +369,7 @@ export default function MyFarmsPanel() {
           </Card>
         ))}
       </div>
+      )}
     </div>
   );
 }

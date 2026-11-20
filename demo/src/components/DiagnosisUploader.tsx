@@ -48,9 +48,7 @@ export default function DiagnosisUploader() {
 
   const diagnoseMutation = useDiagnoseCropMutation();
 
-  // Pick default sample image matching the selected crop
-  const currentCropObj = CROPS.find((c) => c.id === selectedCrop) || CROPS[0];
-  const effectiveImage = activeImage || currentCropObj.sampleImg;
+  const effectiveImage = activeImage;
 
   const cases = useAppStore((state) => state.cases);
   const existingCaseForImage = cases.find(
@@ -116,6 +114,9 @@ export default function DiagnosisUploader() {
   };
 
   const handleStartAnalysis = () => {
+    if (!effectiveImage) {
+      return;
+    }
     diagnoseMutation.mutate({
       crop: selectedCrop,
       cropBn: selectedCropBn,
@@ -238,15 +239,7 @@ export default function DiagnosisUploader() {
                     className="h-8 text-xs"
                   >
                     <UploadCloud className="h-3.5 w-3.5 mr-1.5" />
-                    {isBn ? "নিজের ছবি দিন" : "Upload Custom"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setActiveImage(currentCropObj.sampleImg)}
-                    className="h-8 text-xs text-muted-foreground"
-                  >
-                    {isBn ? "ডিফল্ট নমুনা ব্যবহার" : "Use Sample Specimen"}
+                    {isBn ? "অন্য ছবি নির্বাচন করুন" : "Upload Another"}
                   </Button>
                 </div>
               </div>
@@ -324,10 +317,10 @@ export default function DiagnosisUploader() {
       <div className="pt-2">
         <Button
           onClick={handleStartAnalysis}
-          disabled={diagnoseMutation.isPending}
+          disabled={diagnoseMutation.isPending || !effectiveImage}
           size="lg"
           variant="emerald"
-          className="w-full text-base font-bold shadow-lg shadow-emerald-600/25 py-6 rounded-xl"
+          className="w-full text-base font-bold shadow-lg shadow-emerald-600/25 py-6 rounded-xl disabled:opacity-60 disabled:cursor-not-allowed"
         >
           {diagnoseMutation.isPending ? (
             <span className="flex items-center gap-3">
@@ -336,6 +329,15 @@ export default function DiagnosisUploader() {
                 {isBn
                   ? "ChashiGuard AI বিশ্লেষণ করছে..."
                   : "ChashiGuard AI Analyzing..."}
+              </span>
+            </span>
+          ) : !effectiveImage ? (
+            <span className="flex items-center gap-2">
+              <Camera className="h-5 w-5" />
+              <span>
+                {isBn
+                  ? "প্রথমে পাতার ছবি তুলুন বা আপলোড করুন"
+                  : "Capture or Upload Leaf Photo First"}
               </span>
             </span>
           ) : (

@@ -126,7 +126,7 @@ class AIModelFeedback(Base, UUIDPrimaryKeyMixin):
 
     prediction_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("ai.predictions.id", ondelete="CASCADE"), nullable=False)
     case_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("case_mgmt.diagnosis_cases.id", ondelete="CASCADE"), nullable=False)
-    expert_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
+    expert_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("public.users.id", ondelete="SET NULL"))
     actual_issue_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("catalog.issues.id", ondelete="RESTRICT"))
     is_ai_correct: Mapped[bool] = mapped_column(Boolean, nullable=False)
     feedback_notes: Mapped[Optional[str]] = mapped_column(Text)

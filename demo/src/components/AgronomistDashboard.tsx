@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import DiagnosisResult from "@/components/DiagnosisResult";
 import CaseHistory from "@/components/CaseHistory";
+import { BACKEND_URL } from "@/lib/api";
 import {
   UserCheck,
   Stethoscope,
@@ -20,12 +21,14 @@ import {
   Sparkles,
   ClipboardList,
   History,
+  Loader2,
 } from "lucide-react";
 
 export default function AgronomistDashboard() {
   const { cases, updateCaseStatus, language, setActiveCase, activeTab, setActiveTab } = useAppStore();
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [prescriptionNote, setPrescriptionNote] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const isBn = language === "bn";
 
   const currentTab = activeTab === "history" ? "reviewed" : "queue";
@@ -38,17 +41,43 @@ export default function AgronomistDashboard() {
   const selectedCase =
     cases.find((c) => c.id === selectedCaseId) || pendingCases[0] || cases[0];
 
-  const handleApprove = () => {
+  const handleApprove = async () => {
     if (!selectedCase) return;
-    updateCaseStatus(
-      selectedCase.id,
-      "reviewed",
+    setIsSubmitting(true);
+
+    const noteText =
       prescriptionNote ||
-        (isBn
-          ? "কৃষিবিদ দ্বারা সরাসরি পর্যবেক্ষণ ও কার্যকর চিকিৎসা সুপারিশ অনুমোদন করা হলো।"
-          : "Agronomist verified diagnosis and confirmed treatment prescribed.")
-    );
+      (isBn
+        ? "কৃষিবিদ দ্বারা সরাসরি পর্যবেক্ষণ ও কার্যকর চিকিৎসা সুপারিশ অনুমোদন করা হলো।"
+        : "Agronomist verified diagnosis and confirmed treatment prescribed.");
+
+    const token =
+      typeof window !== "undefined"
+        ? localStorage.getItem("kb_access_token")
+        : null;
+
+    if (token) {
+      try {
+        await fetch(`${BACKEND_URL}/api/v1/expert/cases/${selectedCase.id}/review`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            agreed_with_ai: true,
+            diagnosis_notes_bn: noteText,
+            prescribed_treatment_bn: noteText,
+          }),
+        }).catch(() => {});
+      } catch {
+        // Backend not reachable, fallback to local store
+      }
+    }
+
+    updateCaseStatus(selectedCase.id, "reviewed", noteText);
     setPrescriptionNote("");
+    setIsSubmitting(false);
   };
 
   return (
@@ -228,11 +257,21 @@ export default function AgronomistDashboard() {
                   <div className="flex justify-end gap-2">
                     <Button
                       onClick={handleApprove}
+                      disabled={isSubmitting}
                       size="sm"
                       className="bg-blue-600 hover:bg-blue-700 text-white text-xs h-8 px-4"
                     >
-                      <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />
-                      <span>{isBn ? "অনুমোদন ও প্রেসক্রিপশন পাঠান" : "Authorize Advisory"}</span>
+                      {isSubmitting ? (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                          <span>{isBn ? "সংরক্ষণ হচ্ছে..." : "Saving..."}</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />
+                          <span>{isBn ? "অনুমোদন ও প্রেসক্রিপশন পাঠান" : "Authorize Advisory"}</span>
+                        </>
+                      )}
                     </Button>
                   </div>
                 </CardContent>

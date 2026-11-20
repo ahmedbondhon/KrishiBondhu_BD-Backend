@@ -29,6 +29,7 @@ from app.core.config import settings
 from app.core.security import (
     create_access_token,
     create_refresh_token,
+    get_bd_phone_variants,
     hash_password,
     verify_password,
     verify_refresh_token,
@@ -52,10 +53,11 @@ class AuthService:
           4. Insert the new User record.
         """
         # 1. Check for duplicate phone number
+        variants = get_bd_phone_variants(payload.phone_number)
         existing = await db.execute(
-            select(User).where(User.phone_number == payload.phone_number)
+            select(User).where(User.phone_number.in_(variants))
         )
-        existing_user = existing.scalar_one_or_none()
+        existing_user = existing.scalars().first()
         if existing_user and not getattr(existing_user, "is_deleted", False):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -116,12 +118,13 @@ class AuthService:
         Raises 401 if phone number not found or password doesn't match.
         Uses constant-time comparison to prevent timing attacks.
         """
+        variants = get_bd_phone_variants(phone_number)
         result = await db.execute(
             select(User)
             .options(selectinload(User.role))
-            .where(User.phone_number == phone_number, User.is_deleted == False)
+            .where(User.phone_number.in_(variants), User.is_deleted == False)
         )
-        user = result.scalar_one_or_none()
+        user = result.scalars().first()
 
         if not user or not user.password_hash:
             raise HTTPException(

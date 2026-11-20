@@ -43,7 +43,18 @@ def hash_password(plain_password: str) -> str:
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Check a plain-text password against a stored hash."""
-    return pwd_context.verify(plain_password, hashed_password)
+    if not hashed_password or not plain_password:
+        return False
+    if hashed_password.startswith(("$2a$", "$2b$", "$2y$")):
+        try:
+            import bcrypt
+            return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
+        except Exception:
+            return False
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception:
+        return False
 
 
 def hash_token(token: str) -> str:
@@ -192,33 +203,10 @@ def decode_token_safe(token: str) -> Optional[dict]:
         return None
 
 
-class NormalizedPhone(str):
-    """String subclass that compares equal to both E.164 (+8801...) and local (01...) representations."""
-    def __eq__(self, other: Any) -> bool:
-        if not isinstance(other, str):
-            return super().__eq__(other)
-        if super().__eq__(other):
-            return True
-        s_self = str(self)
-        s_other = str(other)
-        if s_self.startswith("+880") and s_other.startswith("0") and s_self[4:] == s_other[1:]:
-            return True
-        if s_other.startswith("+880") and s_self.startswith("0") and s_other[4:] == s_self[1:]:
-            return True
-        if s_self.startswith("+880") and s_other.startswith("880") and s_self[1:] == s_other:
-            return True
-        if s_other.startswith("+880") and s_self.startswith("880") and s_other[1:] == s_self:
-            return True
-        return False
-
-    def __hash__(self) -> int:
-        return hash(str(self))
-
-
-def normalize_bd_phone(v: Any) -> str:
+def extract_bd_phone_digits(v: Any) -> str:
     """
-    Normalize phone number to +8801XXXXXXXXX E.164 format.
-    Supports Bengali digits, all local separators, and validates BD mobile prefixes (013-019).
+    Extract the 10 core subscriber digits (e.g. '1712345678') from any valid BD mobile number.
+    Supports Bengali numerals, +880, 880, 01, etc.
     Raises ValueError on invalid input.
     """
     if v is None:
@@ -251,7 +239,66 @@ def normalize_bd_phone(v: Any) -> str:
             "Must be an 11-digit valid Bangladeshi mobile operator number starting with 013, 014, 015, 016, 017, 018, or 019."
         )
 
-    return NormalizedPhone(f"+880{s}")
+    return s
+
+
+class NormalizedPhone(str):
+    """String subclass that compares equal to both E.164 (+8801...) and local (01...) representations."""
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, str):
+            return super().__eq__(other)
+        if super().__eq__(other):
+            return True
+        s_self = str(self)
+        s_other = str(other)
+        try:
+            return extract_bd_phone_digits(s_self) == extract_bd_phone_digits(s_other)
+        except Exception:
+            return False
+
+    def __hash__(self) -> int:
+        return hash(str(self))
+
+
+def to_local_bd_phone(v: Any) -> NormalizedPhone:
+    """Return 11-digit local format: 01XXXXXXXXX as NormalizedPhone."""
+    return NormalizedPhone(f"0{extract_bd_phone_digits(v)}")
+
+
+def to_e164_bd_phone(v: Any) -> str:
+    """Return international E.164 format: +8801XXXXXXXXX."""
+    return f"+880{extract_bd_phone_digits(v)}"
+
+
+def get_bd_phone_variants(v: Any) -> list[str]:
+    """
+    Return all possible database representations for a BD phone number:
+    1. Local format: '01XXXXXXXXX' (11 digits, standard in BD databases & Supabase)
+    2. E.164 format: '+8801XXXXXXXXX'
+    3. National prefix without plus: '8801XXXXXXXXX'
+    4. 10 digits without leading 0: '1XXXXXXXXX'
+    """
+    try:
+        core = extract_bd_phone_digits(v)
+    except Exception:
+        clean = str(v).strip() if v is not None else ""
+        return [clean] if clean else []
+    return [
+        f"0{core}",         # e.g. 01712345678 (Local format - primary in Supabase DB)
+        f"+880{core}",       # e.g. +8801712345678 (E.164)
+        f"880{core}",        # e.g. 8801712345678
+        core,                # e.g. 1712345678
+    ]
+
+
+def normalize_bd_phone(v: Any) -> str:
+    """
+    Normalize phone number to +8801XXXXXXXXX E.164 format (as NormalizedPhone).
+    Supports Bengali digits, all local separators, and validates BD mobile prefixes (013-019).
+    Raises ValueError on invalid input.
+    """
+    core = extract_bd_phone_digits(v)
+    return NormalizedPhone(f"+880{core}")
 
 
 import hashlib

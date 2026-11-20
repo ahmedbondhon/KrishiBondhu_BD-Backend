@@ -1,7 +1,13 @@
 """Development-only routes used by the local frontend demo.
 
-This module is included only when DEBUG=True. It deliberately exposes no
-database inspector or credentials; the frontend should use normal API routes.
+This module is included only when DEBUG=True or environment != production.
+It deliberately exposes no database inspector or credentials; the frontend
+should use normal API routes.
+
+SECURITY: These routes must NEVER be reachable in production. The main.py
+already guards the inclusion with `settings.environment != "production"`.
+Set ENVIRONMENT=production in your deployment environment to disable them.
+Set ENABLE_DEMO_ROUTES=false to disable even in non-production environments.
 """
 
 from pathlib import Path
@@ -18,8 +24,19 @@ settings = get_settings()
 demo_router = APIRouter(tags=["Development Demo"])
 
 
+def _assert_demo_allowed() -> None:
+    """Raise 403 if demo routes are accessed in production or explicitly disabled."""
+    env = (settings.environment or settings.app_env or "development").lower()
+    if env in ("production", "prod"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Demo routes are disabled in production.",
+        )
+
+
 @demo_router.get("/demo", include_in_schema=False)
 async def demo_ui():
+    _assert_demo_allowed()
     demo_file = Path(__file__).resolve().parents[3] / "demo" / "frontend_demo.html"
     if not demo_file.is_file():
         raise HTTPException(
@@ -31,6 +48,10 @@ async def demo_ui():
 
 @demo_router.get("/demo/sms-inbox", include_in_schema=False)
 async def get_sms_inbox(phone: Annotated[str, Query(...)]):
+    # Bug 4 fix: Explicitly block access in production environment.
+    # In a real deployment set ENVIRONMENT=production to disable this entirely.
+    _assert_demo_allowed()
+
     try:
         normalized_phone = normalize_bd_phone(phone)
     except ValueError as exc:
