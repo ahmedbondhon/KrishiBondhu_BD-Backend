@@ -57,6 +57,7 @@ auth_service = AuthService()
 @router.post("/register", status_code=201, summary="Register a new user account")
 async def register(
     request: Request,
+    payload: RegisterRequest,
     db: AsyncSession = Depends(get_db),
 ):
     """

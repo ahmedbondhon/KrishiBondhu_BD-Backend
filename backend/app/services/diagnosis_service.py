@@ -1,14 +1,14 @@
-"""
+﻿"""
 services/diagnosis_service.py
 ==============================
-Core business logic for the ChashiGuard (ফসল রক্ষক) diagnosis flow.
+Core business logic for the ChashiGuard diagnosis flow.
 
-This is the most critical service in the system. It orchestrates:
+It orchestrates:
   1. Creating and managing diagnosis cases.
   2. Calling the internal AI service for image analysis.
   3. Applying the confidence threshold to decide next steps:
-       - HIGH/MEDIUM confidence → generate Bangla advisory from templates.
-       - LOW confidence         → escalate to human expert (NO unverified advice shown).
+       - HIGH/MEDIUM confidence -> generate Bangla advisory from templates.
+       - LOW confidence         -> escalate to human expert.
   4. Retrieving advisory content for farmers.
   5. Logging all status changes for audit trails.
 
@@ -62,6 +62,20 @@ def _confidence_label(score: float) -> str:
     return "low"
 
 
+def _normalize_code(value: Optional[str]) -> str:
+    """Normalize an issue code or label: 'Potato Late Blight' -> 'potato_late_blight'."""
+    if not value:
+        return ""
+    return value.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _pred_code(item: dict) -> str:
+    """Best-effort issue code for one top_predictions item."""
+    return _normalize_code(
+        item.get("issue_code") or item.get("class_label") or item.get("class")
+    )
+
+
 async def _generate_case_number(db: AsyncSession) -> str:
     """
     Generate a sequential, human-readable case number (e.g., KB-2026-000124).
@@ -92,9 +106,10 @@ class DiagnosisService:
     def __init__(self):
         self._http_client: Optional[httpx.AsyncClient] = None
 
-    def _get_client(self, timeout: float = 15.0) -> httpx.AsyncClient:
+    def _get_client(self) -> httpx.AsyncClient:
+        # Timeouts are passed per request, so the shared client has a generous default.
         if self._http_client is None or self._http_client.is_closed:
-            self._http_client = httpx.AsyncClient(timeout=timeout)
+            self._http_client = httpx.AsyncClient(timeout=90.0)
         return self._http_client
 
     async def close(self) -> None:
@@ -103,7 +118,7 @@ class DiagnosisService:
             await self._http_client.aclose()
             self._http_client = None
 
-    # ── Case Management ───────────────────────────────────────────
+    # -- Case Management ---------------------------------------------------
 
     async def create_case(
         self,
@@ -123,7 +138,7 @@ class DiagnosisService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"code": "CROP_NOT_FOUND", "message_bn": "ফসলটি পাওয়া যায়নি।"},
             )
-            
+
         # 1. Validate plot_id belongs to the farmer
         if payload.plot_id:
             plot_res = await db.execute(
@@ -304,7 +319,7 @@ class DiagnosisService:
         await db.flush()
         return case_image
 
-    # ── AI Analysis ───────────────────────────────────────────────
+    # -- AI Analysis -------------------------------------------------------
 
     async def analyze_case(
         self, db: AsyncSession, case_id: uuid.UUID, farmer_id: uuid.UUID, user_role: str = "farmer", **kwargs
@@ -315,14 +330,13 @@ class DiagnosisService:
         Steps:
           1. Load the case (verify ownership + has primary image).
           2. Update case status to 'processing'.
-          3. Call internal AI service image quality check.
-          4. Call internal AI service crop diagnosis prediction.
-          5. Save prediction to ai.predictions.
-          6. Apply confidence threshold:
-             - High/Medium: generate advisory → status = 'ai_analyzed'
-             - Low:         skip advisory    → status = 'escalated', assign to expert queue
-          7. Log status change in case_status_history.
-          8. Return diagnosis result.
+          3. Call internal AI service crop diagnosis prediction.
+          4. Save prediction to ai.predictions.
+          5. Apply confidence threshold:
+             - High/Medium: generate advisory -> status = 'ai_analyzed'
+             - Low:         skip advisory    -> status = 'escalated', assign to expert queue
+          6. Log status change in case_status_history.
+          7. Return diagnosis result.
         """
         case = await self._get_case_for_farmer(db, case_id, farmer_id, user_role=user_role)
 
@@ -379,18 +393,19 @@ class DiagnosisService:
                 storage_path=image_file.storage_path,
             )
 
-            # Resolve primary issue from AI result
+            # Resolve primary issue from AI result (case-insensitive match)
             issue = None
-            if ai_result.get("primary_issue_code"):
+            primary_code = _normalize_code(ai_result.get("primary_issue_code"))
+            if primary_code:
                 issue_result = await db.execute(
-                    select(Issue).where(Issue.code == ai_result["primary_issue_code"])
+                    select(Issue).where(func.lower(Issue.code) == primary_code)
                 )
                 issue = issue_result.scalar_one_or_none()
 
             confidence_score = float(ai_result.get("confidence_score", 0.0))
             is_confident = confidence_score >= settings.ai_confidence_threshold
 
-            # Save AI prediction (IMMUTABLE — never update this record)
+            # Save AI prediction (IMMUTABLE - never update this record)
             prediction = AIPrediction(
                 case_id=case.id,
                 model_id=ai_model.id,
@@ -417,19 +432,24 @@ class DiagnosisService:
             await db.flush()
 
             # Resolve issue_ids for top_predictions (Bug 3.1)
-            top_labels = [r.get("class_label") or r.get("class") for r in ai_result.get("top_predictions", []) if (r.get("class_label") or r.get("class"))]
+            top_predictions = ai_result.get("top_predictions", []) or []
+            top_codes = [c for c in (_pred_code(r) for r in top_predictions) if c]
             issue_map = {}
-            if top_labels:
+            if top_codes:
                 issues_res = await db.execute(
-                    select(Issue).where(Issue.code.in_(top_labels))
+                    select(Issue).where(func.lower(Issue.code).in_(top_codes))
                 )
                 for iss in issues_res.scalars().all():
-                    issue_map[iss.code] = iss.id
+                    issue_map[iss.code.lower()] = iss.id
 
             # Save top-N prediction details with matched issue_id
-            for idx, rank_data in enumerate(ai_result.get("top_predictions", [])):
+            resolved_ids = []
+            for idx, rank_data in enumerate(top_predictions):
                 label = rank_data.get("class_label") or rank_data.get("class")
-                matched_id = issue_map.get(label)
+                matched_id = issue_map.get(_pred_code(rank_data))
+                if matched_id is None and idx == 0 and issue:
+                    matched_id = issue.id  # rank 1 is the primary issue
+                resolved_ids.append(matched_id)
                 rank = rank_data.get("rank") or rank_data.get("rank_order") or (idx + 1)
                 conf = rank_data.get("confidence_score") or rank_data.get("confidence") or 0.0
                 detail = AIPredictionDetail(
@@ -453,7 +473,7 @@ class DiagnosisService:
                     issue=issue,
                     growth_stage_id=case.growth_stage_id,
                 )
-                await self._update_status(db, case, "ai_analyzed", notes="High/medium confidence — advisory generated")
+                await self._update_status(db, case, "ai_analyzed", notes="High/medium confidence - advisory generated")
                 case.urgency_level = ai_result.get("urgency_level", "medium")
                 case.resolved_at = datetime.now(timezone.utc)
 
@@ -489,8 +509,8 @@ class DiagnosisService:
                         "source": advisory.source,
                     }
             else:
-                # Low confidence → escalate to expert
-                # Deactivate/unpublish any previously generated advisory to prevent stale advice
+                # Low confidence (or unknown issue) -> escalate to expert
+                # Unpublish any previously generated advisory to prevent stale advice
                 existing_adv_res = await db.execute(
                     select(Advisory).where(Advisory.case_id == case.id)
                 )
@@ -500,7 +520,7 @@ class DiagnosisService:
 
                 await self._update_status(
                     db, case, "escalated",
-                    notes="Low confidence — escalated to expert review queue"
+                    notes="Low confidence - escalated to expert review queue"
                 )
                 case.urgency_level = "high"  # Conservative: treat unknown as urgent
 
@@ -554,9 +574,9 @@ class DiagnosisService:
                     "rank": r.get("rank") or r.get("rank_order") or (i + 1),
                     "class_label": r.get("class_label") or r.get("class"),
                     "confidence_score": r.get("confidence_score") or r.get("confidence") or 0.0,
-                    "issue_id": str(issue_map.get(r.get("class_label") or r.get("class"))) if issue_map.get(r.get("class_label") or r.get("class")) else None,
+                    "issue_id": str(resolved_ids[i]) if resolved_ids[i] else None,
                 }
-                for i, r in enumerate(ai_result.get("top_predictions", []))
+                for i, r in enumerate(top_predictions)
             ]
 
             # Explicitly commit all analysis results, predictions, and advisories to the DB
@@ -630,18 +650,18 @@ class DiagnosisService:
             else:
                 signed_url = storage_service.generate_view_url(storage_path)
 
-            fetch_client = self._get_client(timeout=5.0)
-            img_response = await fetch_client.get(signed_url)
+            fetch_client = self._get_client()
+            img_response = await fetch_client.get(signed_url, timeout=10.0)
             if img_response.status_code == 200:
                 image_base64 = base64.b64encode(img_response.content).decode("utf-8")
                 content_type = img_response.headers.get("content-type", "image/jpeg")
                 image_mime_type = content_type.split(";")[0].strip()
         except Exception:
-            pass  # No image bytes — AI service will use mock fallback
+            pass  # No image bytes - AI service will use mock fallback
 
-        # Step 2: Call AI service with image data (timeout 15s)
+        # Step 2: Call AI service with image data
         try:
-            client = self._get_client(timeout=15.0)
+            client = self._get_client()
             response = await client.post(
                 f"{settings.ai_service_url}/internal/v1/crop-diagnosis/predict",
                 json={
@@ -651,6 +671,7 @@ class DiagnosisService:
                     "image_base64": image_base64,
                     "image_mime_type": image_mime_type,
                 },
+                timeout=90.0,
             )
             response.raise_for_status()
             return response.json()
@@ -665,7 +686,6 @@ class DiagnosisService:
                 "error": "AI service unavailable",
             }
 
-
     async def _generate_advisory(
         self,
         db: AsyncSession,
@@ -677,7 +697,7 @@ class DiagnosisService:
         """
         Find the best matching advisory template and create an Advisory record.
 
-        Query priority: (issue_id + growth_stage_id + severity) → (issue_id + severity)
+        Query priority: (issue_id + growth_stage_id) -> (issue_id, any stage)
         """
         # Try exact match with growth stage
         template_query = select(AdvisoryTemplate).where(
@@ -704,7 +724,7 @@ class DiagnosisService:
             template = fallback.scalar_one_or_none()
 
         if not template:
-            return None  # No template found — case will still be marked diagnosed
+            return None  # No template found - case will still be marked diagnosed
 
         # Query active remedies for this issue from catalog.remedies (Bug 1.2)
         remedies_res = await db.execute(
@@ -768,7 +788,7 @@ class DiagnosisService:
         await db.flush()
         return advisory
 
-    # ── Expert Review ─────────────────────────────────────────────
+    # -- Expert Review -----------------------------------------------------
 
     async def submit_expert_review(
         self,
@@ -815,7 +835,7 @@ class DiagnosisService:
             if role not in ("admin", "administrator", "tech_admin", "technical_admin"):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail={"code": "FORBIDDEN", "message_bn": "এই কেসটি অন্য একজন বিশেষজ্ঞের দায়িত্বে রয়েছে।"},
+                    detail={"code": "FORBIDDEN", "message_bn": "এই কেসটি অন্য একজন বিশেষজ্ঞের দায়িত্বে রয়েছে।"},
                 )
 
         if not case.assigned_expert_id:
@@ -933,7 +953,7 @@ class DiagnosisService:
         if not title.startswith("বিশেষজ্ঞ"):
             title = f"বিশেষজ্ঞ পরামর্শ: {title}"
 
-        treatment_bn = payload.prescribed_treatment_bn or payload.diagnosis_notes_bn or "বিশেষজ্ঞ পরামর্শ দেওয়া হয়েছে।"
+        treatment_bn = payload.prescribed_treatment_bn or payload.diagnosis_notes_bn or "বিশেষজ্ঞ পরামর্শ দেওয়া হয়েছে।"
         summary_bn = payload.diagnosis_notes_bn or "বিশেষজ্ঞ কর্তৃক পর্যালোচিত পরামর্শ।"
 
         if advisory:
@@ -1023,8 +1043,6 @@ class DiagnosisService:
         )
 
         # Attempt to assign an available expert who hasn't exceeded max_active_cases
-        from sqlalchemy import func
-        # Find active pending assignments per expert
         active_counts_subq = (
             select(
                 CaseAssignment.expert_id,
@@ -1051,7 +1069,7 @@ class DiagnosisService:
                 func.coalesce(active_counts_subq.c.active_case_count, 0) < ExpertProfile.max_active_cases,
             )
             .order_by(
-                func.coalesce(active_counts_subq.c.active_case_count, 0).asc(),  # Load balancing: least busy first
+                func.coalesce(active_counts_subq.c.active_case_count, 0).asc(),  # least busy first
                 ExpertProfile.rating.desc(),
             )
             .limit(1)
@@ -1109,7 +1127,7 @@ class DiagnosisService:
         await db.flush()
         return case
 
-    # ── Feedback ──────────────────────────────────────────────────
+    # -- Feedback ----------------------------------------------------------
 
     async def submit_feedback(
         self,
@@ -1121,7 +1139,7 @@ class DiagnosisService:
         **kwargs,
     ) -> AdvisoryFeedback:
         """Record farmer's outcome feedback for the advisory received."""
-        # 1. Verify case ownership (farmer can only submit feedback for their own case, or agent on their behalf)
+        # 1. Verify case ownership (farmer only for own case, or agent on their behalf)
         case = await self._get_case_for_farmer(db, case_id, farmer_id, user_role=user_role)
         target_farmer_id = case.farmer_id
 
@@ -1136,7 +1154,7 @@ class DiagnosisService:
                 detail={"code": "ADVISORY_NOT_FOUND", "message_bn": "এই কেসের জন্য কোনো পরামর্শ পাওয়া যায়নি।"},
             )
 
-        # 3. Check if feedback already exists for this advisory from this farmer (prevent duplicates)
+        # 3. Check if feedback already exists for this advisory from this farmer
         existing_fb_result = await db.execute(
             select(AdvisoryFeedback).where(
                 AdvisoryFeedback.advisory_id == advisory.id,
@@ -1164,7 +1182,7 @@ class DiagnosisService:
         await db.flush()
         return feedback
 
-    # ── Helpers ───────────────────────────────────────────────────
+    # -- Helpers -----------------------------------------------------------
 
     async def _get_case_for_farmer(
         self, db: AsyncSession, case_id: uuid.UUID, farmer_id: uuid.UUID, user_role: str = "farmer", **kwargs
@@ -1212,7 +1230,7 @@ class DiagnosisService:
         case_id: uuid.UUID,
         user_id: uuid.UUID,
         user_role: str = "farmer",
-        background_tasks = None,
+        background_tasks=None,
         **kwargs,
     ) -> bool:
         """
