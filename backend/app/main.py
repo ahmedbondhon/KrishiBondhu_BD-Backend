@@ -18,6 +18,10 @@ Or using the start script:
 """
 
 import logging
+import os
+import socket
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
@@ -75,7 +79,55 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"⚠️ Storage service warmup skipped: {e}")
 
+    # ── Auto-start internal AI Microservice on 0.0.0.0:8001 ───
+    ai_proc = None
+    try:
+        def _is_port_open(port: int) -> bool:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                return s.connect_ex(("127.0.0.1", port)) == 0
+
+        if not _is_port_open(8001):
+            ai_path = None
+            for candidate in ["./ai-service", "../ai-service", "../../ai-service"]:
+                if os.path.isdir(candidate):
+                    ai_path = os.path.abspath(candidate)
+                    break
+            if ai_path:
+                logger.info(f"🤖 Starting internal AI Service on 0.0.0.0:8001 from {ai_path}...")
+                env = os.environ.copy()
+                env["PYTHONPATH"] = ai_path
+                ai_proc = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-m",
+                        "uvicorn",
+                        "app.main:app",
+                        "--app-dir",
+                        ai_path,
+                        "--host",
+                        "0.0.0.0",
+                        "--port",
+                        "8001",
+                    ],
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                logger.info("✅ Internal AI Service started on 0.0.0.0:8001")
+        else:
+            logger.info("✅ AI Service already running on port 8001.")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not auto-start AI service on 8001: {e}")
+
     yield  # Application is running
+
+    if ai_proc:
+        try:
+            ai_proc.terminate()
+            logger.info("🛑 AI Service process terminated.")
+        except Exception:
+            pass
 
     logger.info("🛑 KrishiBondhu API shutting down...")
     try:
