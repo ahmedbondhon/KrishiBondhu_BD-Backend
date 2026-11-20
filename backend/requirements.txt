@@ -1,13 +1,15 @@
 # ============================================================
-# KrishiBondhu Bangladesh - FastAPI Backend Dependencies
+# KrishiBondhu Bangladesh - FastAPI Backend
+# Production Deployment Dependencies
+# Python 3.11
 # ============================================================
 
 # --- Core Framework ---
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.32.0,<1.0.0
 
-# --- Database (PostgreSQL + SQLAlchemy + Alembic) ---
-sqlalchemy[asyncio]>=2.0.35
+# --- Database: PostgreSQL + SQLAlchemy AsyncIO ---
+sqlalchemy[asyncio]>=2.0.35,<3.0.0
 greenlet>=3.0.3
 alembic>=1.13.3
 asyncpg>=0.30.0
@@ -23,19 +25,25 @@ bcrypt==4.2.0
 pydantic>=2.10.0,<3.0.0
 pydantic-settings>=2.5.2
 python-multipart>=0.0.12
+email-validator>=2.2.0
 
-# --- AI Service, Vision & Storage ---
+# --- AI Integration ---
 google-genai>=1.0.0
+
+# --- File Processing & Image Handling ---
 pymupdf>=1.24.0
 numpy>=1.26.0
-boto3>=1.35.28
-httpx>=0.28.1,<1.0.0
 Pillow>=10.4.0
+
+# --- Supabase S3-Compatible Storage ---
+boto3>=1.35.28
+
+# --- HTTP Client ---
+httpx>=0.28.1,<1.0.0
 
 # --- Utilities ---
 python-dotenv>=1.0.1
 pytz>=2024.2
 
-# --- Rate Limiting & Validation ---
+# --- Rate Limiting ---
 slowapi>=0.1.9
-email-validator>=2.2.0
