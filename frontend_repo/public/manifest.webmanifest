@@ -1,0 +1,11 @@
+{
+  "name": "কৃষিবন্ধু বাংলাদেশ",
+  "short_name": "কৃষিবন্ধু",
+  "description": "ছবি তুলে ফসলের রোগ চিনুন, বাংলায় পরামর্শ পান",
+  "start_url": "/farmer/dashboard",
+  "display": "standalone",
+  "background_color": "#F4F7F3",
+  "theme_color": "#0C3324",
+  "lang": "bn",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

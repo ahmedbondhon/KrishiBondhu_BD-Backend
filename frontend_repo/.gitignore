@@ -1,0 +1,38 @@
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# next.js build output
+.next/
+out/
+build/
+next-env.d.ts
+
+# secrets / local config (never commit these) — only .env.example is tracked
+.env
+.env.*
+!.env.example
+
+# typescript / tooling caches
+*.tsbuildinfo
+.eslintcache
+.turbo/
+.vercel
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# tests / coverage
+coverage/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
